@@ -1,0 +1,290 @@
+"""Interactive optimizer benchmark.
+
+Run with:
+    python benchmark.py
+
+You are first prompted to select one or more datasets, then one or more
+models, then one or more optimizers.  Every (dataset, model, optimizer)
+triple is trained in sequence and the results are plotted together for
+easy comparison.
+
+Optional CLI flags let you set shared hyperparameters without re-running:
+    --epochs, --batch-size, --hidden-sizes, --lr, --device, --save-plot
+"""
+
+import argparse
+from collections import OrderedDict
+
+import torch
+import torch.nn as nn
+
+from model import MLP, ResNet18, ViT
+from optimizers import Lion, LAMB, Shampoo
+from train import DATASET_INFO, get_dataloaders, linear_layer_names, run_training
+from visualizer import plot_benchmark
+
+
+# ---------------------------------------------------------------------------
+# Registries
+# ---------------------------------------------------------------------------
+
+DATASET_REGISTRY: OrderedDict = OrderedDict([
+    ("MNIST",          "mnist"),
+    ("Fashion MNIST",  "fashion_mnist"),
+    ("CIFAR-10",       "cifar10"),
+    ("Tiny ImageNet",  "tiny_imagenet"),
+])
+
+MODEL_REGISTRY: OrderedDict = OrderedDict([
+    ("MLP", {
+        "factory": lambda info, hs: MLP(
+            input_size=info["input_size"],
+            hidden_sizes=hs,
+            num_classes=info["num_classes"],
+        ),
+        "description": "Fully Connected (width & depth via --hidden-sizes)",
+    }),
+    ("ResNet-18", {
+        "factory": lambda info, hs: ResNet18(
+            in_channels=info["in_channels"],
+            num_classes=info["num_classes"],
+        ),
+        "description": "ResNet-18 (adapted for small images)",
+    }),
+    ("ViT", {
+        "factory": lambda info, hs: ViT(
+            image_size=int((info["input_size"] / info["in_channels"]) ** 0.5),
+            in_channels=info["in_channels"],
+            num_classes=info["num_classes"],
+        ),
+        "description": "Vision Transformer (patch=4, dim=128, depth=6, heads=8)",
+    }),
+])
+
+# Each entry: factory function + sensible default LR + display colour
+OPTIMIZER_REGISTRY: OrderedDict = OrderedDict([
+    ("SGD",          {
+        "factory":    lambda p, lr: torch.optim.SGD(p, lr=lr),
+        "default_lr": 0.01,
+        "color":      "#e41a1c",   # red
+    }),
+    ("SGD+Momentum", {
+        "factory":    lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9),
+        "default_lr": 0.01,
+        "color":      "#ff7f00",   # orange
+    }),
+    ("Adam",         {
+        "factory":    lambda p, lr: torch.optim.Adam(p, lr=lr),
+        "default_lr": 0.001,
+        "color":      "#377eb8",   # blue
+    }),
+    ("Adagrad",      {
+        "factory":    lambda p, lr: torch.optim.Adagrad(p, lr=lr),
+        "default_lr": 0.01,
+        "color":      "#4daf4a",   # green
+    }),
+    ("AdamW",        {
+        "factory":    lambda p, lr: torch.optim.AdamW(p, lr=lr),
+        "default_lr": 0.001,
+        "color":      "#984ea3",   # purple
+    }),
+    ("NAdam",        {
+        "factory":    lambda p, lr: torch.optim.NAdam(p, lr=lr),
+        "default_lr": 0.002,
+        "color":      "#a65628",   # brown
+    }),
+    ("RAdam",        {
+        "factory":    lambda p, lr: torch.optim.RAdam(p, lr=lr),
+        "default_lr": 0.001,
+        "color":      "#f781bf",   # pink
+    }),
+    ("Lion",         {
+        "factory":    lambda p, lr: Lion(p, lr=lr),
+        "default_lr": 0.0001,
+        "color":      "#17becf",   # teal
+    }),
+    ("LAMB",         {
+        "factory":    lambda p, lr: LAMB(p, lr=lr),
+        "default_lr": 0.001,
+        "color":      "#8c564b",   # dark red
+    }),
+    ("Shampoo",      {
+        "factory":    lambda p, lr: Shampoo(p, lr=lr),
+        "default_lr": 0.01,
+        "color":      "#bcbd22",   # yellow-green
+    }),
+    # --- ADD YOUR CUSTOM OPTIMIZER HERE ---
+    # ("MyOptimizer", {
+    #     "factory":    lambda p, lr: MyOptimizer(p, lr=lr),
+    #     "default_lr": 0.001,
+    #     "color":      "#e377c2",
+    # }),
+])
+
+
+# ---------------------------------------------------------------------------
+# Interactive selection menus
+# ---------------------------------------------------------------------------
+
+def prompt_multiselect(title: str, options: list[str], descriptions: list[str] | None = None) -> list[str]:
+    """Print a numbered menu and return the user-selected subset (multi-select)."""
+    width = 56
+    print(f"\n{'─' * width}")
+    print(f"  {title}")
+    print(f"  Enter numbers separated by commas, or 'all'")
+    print(f"{'─' * width}")
+    for i, opt in enumerate(options, 1):
+        desc = f"  ({descriptions[i-1]})" if descriptions else ""
+        print(f"  [{i}]  {opt}{desc}")
+    print()
+
+    while True:
+        raw = input("  > ").strip()
+        if raw.lower() == "all":
+            return list(options)
+        try:
+            indices = [int(x.strip()) for x in raw.split(",") if x.strip()]
+            if indices and all(1 <= idx <= len(options) for idx in indices):
+                seen: set = set()
+                return [
+                    options[idx - 1]
+                    for idx in indices
+                    if not (options[idx - 1] in seen or seen.add(options[idx - 1]))  # type: ignore[func-returns-value]
+                ]
+        except ValueError:
+            pass
+        print(f"  Invalid input. Enter numbers 1–{len(options)} separated by commas.")
+
+
+# ---------------------------------------------------------------------------
+# Device helper
+# ---------------------------------------------------------------------------
+
+def get_device(preference: str) -> torch.device:
+    if preference == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(preference)
+
+
+# ---------------------------------------------------------------------------
+# Benchmark runner
+# ---------------------------------------------------------------------------
+
+def run_benchmark(
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    hidden_sizes: list[int],
+    epochs: int,
+    batch_size: int,
+    data_dir: str,
+    device: torch.device,
+    lr_override: float | None,
+) -> dict:
+    """Train every (dataset, model, optimizer) triple and collect histories.
+
+    Returns
+    -------
+    dict mapping (dataset_name, model_name, optimizer_name) -> history_dict
+    """
+    results: dict = {}
+    criterion = nn.CrossEntropyLoss()
+    total_runs = len(dataset_names) * len(model_names) * len(optimizer_names)
+    run_idx = 0
+
+    for ds_name in dataset_names:
+        ds_key = DATASET_REGISTRY[ds_name]
+        ds_info = DATASET_INFO[ds_key]
+        print(f"\n  Loading {ds_name}...")
+        train_loader, test_loader = get_dataloaders(ds_key, batch_size, data_dir)
+
+        for mdl_name in model_names:
+            mdl_info = MODEL_REGISTRY[mdl_name]
+
+            for opt_name in optimizer_names:
+                run_idx += 1
+                opt_info = OPTIMIZER_REGISTRY[opt_name]
+                lr = lr_override if lr_override is not None else opt_info["default_lr"]
+
+                print(f"\n{'═' * 60}")
+                print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {opt_name}  (lr={lr})")
+                print(f"{'═' * 60}")
+
+                model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
+                optimizer = opt_info["factory"](model.parameters(), lr)
+                layer_names = linear_layer_names(model)
+
+                history = run_training(
+                    model, train_loader, test_loader,
+                    optimizer, criterion, device,
+                    epochs, layer_names, verbose=True,
+                )
+                results[(ds_name, mdl_name, opt_name)] = history
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# CLI & main
+# ---------------------------------------------------------------------------
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Interactive optimizer benchmark")
+    p.add_argument("--epochs",       default=10,         type=int,
+                   help="Training epochs per run")
+    p.add_argument("--batch-size",   default=128,        type=int)
+    p.add_argument("--hidden-sizes", default=[256, 128], type=int, nargs="+", metavar="N",
+                   help="Hidden layer widths for MLP, e.g. --hidden-sizes 256 128")
+    p.add_argument("--lr",           default=None,       type=float,
+                   help="Override all optimizer default LRs (omit to use per-optimizer defaults)")
+    p.add_argument("--data-dir",     default="./data")
+    p.add_argument("--device",       default="auto",     help="cpu | cuda | mps | auto")
+    p.add_argument("--save-plot",    default="benchmark.png",
+                   help="Path to save comparison figure ('' to disable)")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    device = get_device(args.device)
+
+    print(f"\n  Device       : {device}")
+    print(f"  Epochs       : {args.epochs}")
+    if args.lr is not None:
+        print(f"  LR (global)  : {args.lr}")
+    else:
+        print(f"  LR           : per-optimizer defaults")
+
+    # ── Interactive selection ─────────────────────────────────────────────
+    dataset_names   = prompt_multiselect("Select Datasets",   list(DATASET_REGISTRY.keys()))
+    model_descs     = [MODEL_REGISTRY[m]["description"] for m in MODEL_REGISTRY]
+    model_names     = prompt_multiselect("Select Models",     list(MODEL_REGISTRY.keys()), model_descs)
+    optimizer_names = prompt_multiselect("Select Optimizers", list(OPTIMIZER_REGISTRY.keys()))
+
+    print(f"\n  Selected datasets   : {', '.join(dataset_names)}")
+    print(f"  Selected models     : {', '.join(model_names)}")
+    print(f"  Selected optimizers : {', '.join(optimizer_names)}")
+
+    # ── Run ───────────────────────────────────────────────────────────────
+    results = run_benchmark(
+        dataset_names, model_names, optimizer_names,
+        hidden_sizes=args.hidden_sizes,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+        device=device,
+        lr_override=args.lr,
+    )
+
+    # ── Plot ──────────────────────────────────────────────────────────────
+    opt_colors = {name: OPTIMIZER_REGISTRY[name]["color"] for name in optimizer_names}
+    save_path  = args.save_plot if args.save_plot else None
+    plot_benchmark(results, dataset_names, model_names, optimizer_names, opt_colors, save_path=save_path)
+
+
+if __name__ == "__main__":
+    main()
