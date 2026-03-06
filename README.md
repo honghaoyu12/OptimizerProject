@@ -33,7 +33,8 @@ OptimizerProject/
 │       └── ci.yml        # GitHub Actions CI — runs all tests on push/PR
 ├── requirements.txt      # Python dependencies
 ├── data/                 # Datasets downloaded here automatically
-├── CHANGELOG.md          # History of all changes
+├── CHANGELOG.md          # Technical history of all file changes
+├── SESSION_LOG.md        # Narrative log of all project discussions and decisions
 └── README.md
 ```
 
@@ -600,3 +601,21 @@ Adam + layer-wise trust ratio. Default weight_decay=0.01, lr=1e-3.
 #### `shampoo.py` — `Shampoo`
 
 Kronecker-factored preconditioner. Inverse roots recomputed every 10 steps on CPU. Default lr=0.01.
+
+---
+
+## Session Log
+
+A narrative record of how the project was built, session by session. The full log is in [`SESSION_LOG.md`](SESSION_LOG.md).
+
+| Session | Topic | Key additions |
+|---|---|---|
+| 1 | Initial setup | `model.py` (MLP), `train.py`, `optimizers/` (BaseOptimizer, VanillaSGD) |
+| 2 | Live visualisation and benchmark runner | `visualizer.py` (2×2 dashboard), `benchmark.py`, `run_training()` |
+| 3 | Diagnostics, CIFAR-10, model selection | `metrics.py`, ResNet-18, CIFAR-10, 3×2 dashboard, richer training metrics |
+| 4 | Vision Transformer | ViT in `model.py` and `build_model()` |
+| 5 | Tiny ImageNet | Auto-download and reorganisation in `train.py` |
+| 6 | 7 new optimizers | Lion, LAMB, Shampoo (custom); AdamW, NAdam, RAdam, Adagrad (PyTorch) |
+| 7 | README, CHANGELOG, Git, GitHub | `CHANGELOG.md`, `README.md`, `requirements.txt`, pushed to GitHub |
+| 8 | Test suite and CI pipeline | 72 pytest tests across 4 files, `.github/workflows/ci.yml`, all green |
+| 9 | Version control strategy | Discussed branches, tags, and safe upgrade workflow |
