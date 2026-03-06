@@ -162,3 +162,34 @@ A chronological record of everything discussed and built across all conversation
 | Tests | 72 passing |
 | CI | GitHub Actions, green |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
+
+---
+
+## Session 10 — Housekeeping and Branch Setup
+
+**What we discussed:**
+- How to safely upgrade the project in the future without breaking working code
+- Whether git automatically handles version history (yes — every commit is a permanent snapshot)
+- Whether a local backup is needed (no — GitHub serves as off-site backup; tags useful for named restore points)
+- How memory files work: `MEMORY.md` is loaded into context at the start of every new conversation so Claude doesn't start from scratch
+
+**What was done:**
+- Updated `MEMORY.md` to reflect the full current project state (all models, datasets, optimizers, test files, CI, known issues, git remote)
+- Added `SESSION_LOG.md` to the project and committed it to GitHub
+- Added session log summary table and `SESSION_LOG.md` reference to `README.md`
+- Created and pushed `new_feature` branch — all future work happens here until ready to merge into `main`
+
+---
+
+## Current State (start of next session)
+
+| Component | Status |
+|---|---|
+| Models | MLP, ResNet-18, ViT |
+| Datasets | MNIST, FashionMNIST, CIFAR-10, Tiny ImageNet |
+| Optimizers | 11 total |
+| Tests | 72 passing |
+| CI | GitHub Actions, green |
+| Active branch | `new_feature` (branched from `main`) |
+| GitHub | https://github.com/honghaoyu12/OptimizerProject |
+| Next step | Work on new features in `new_feature` branch, then open a PR to merge into `main` |
