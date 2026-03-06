@@ -4,6 +4,27 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 7 — Test Suite and CI Pipeline
+
+### New files: `tests/test_models.py`, `tests/test_optimizers.py`, `tests/test_metrics.py`, `tests/test_train.py`, `tests/__init__.py`
+
+**72 pytest tests** covering every major component:
+
+- **`test_models.py`** (17 tests) — MLP, ResNet18, ViT forward passes across all supported image sizes and class counts; patch size assertion; positional embedding shape check.
+- **`test_optimizers.py`** (18 tests) — Registry completeness (11 entries); parametrized one-step finite-weight check for every optimizer; `VanillaSGD` update direction and zero-grad; `Lion` momentum buffer and weight decay; `LAMB` state fields and step counter; `Shampoo` Kronecker state, diagonal fallback, and multi-step stability.
+- **`test_metrics.py`** (9 tests) — `compute_hessian_trace`: return type, finiteness, positivity, graceful NaN on parameter-free model. `compute_sharpness`: return type, non-negativity, finiteness, weight restoration, monotonicity with epsilon.
+- **`test_train.py`** (28 tests) — `DATASET_INFO` keys and metadata; `build_model` for all model×dataset combos; `linear_layer_names` / `weight_norms` helpers; `train_one_epoch` return keys, finite loss, accuracy range, step-loss count, per-layer grad-norm keys; `evaluate` finiteness; loss-decreases-over-5-epochs integration test.
+
+### New file: `.github/workflows/ci.yml`
+
+- GitHub Actions workflow triggered on every push and pull request to `main`.
+- Runs on `ubuntu-latest` with Python 3.12.
+- Installs CPU-only PyTorch (`--index-url https://download.pytorch.org/whl/cpu`) for fast CI execution.
+- Pip cache keyed on `requirements.txt` to speed up subsequent runs.
+- Executes `pytest tests/ -v`; all 72 tests pass in ~48 s.
+
+---
+
 ## Round 6 — Optimizer Expansion (7 new optimizers)
 
 ### New files: `optimizers/lion.py`, `optimizers/lamb.py`, `optimizers/shampoo.py`
