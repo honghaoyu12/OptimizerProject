@@ -1,5 +1,7 @@
 # OptimizerProject
 
+[![CI](https://github.com/honghaoyu12/OptimizerProject/actions/workflows/ci.yml/badge.svg)](https://github.com/honghaoyu12/OptimizerProject/actions/workflows/ci.yml)
+
 A testing ground for custom numerical optimizers. Train a neural network on MNIST, FashionMNIST, CIFAR-10, or Tiny ImageNet, plug in your own optimizer, and watch detailed diagnostics update live.
 
 ---
@@ -20,6 +22,16 @@ OptimizerProject/
 │   ├── lion.py           # Lion — EvoLved Sign Momentum
 │   ├── lamb.py           # LAMB — Layer-wise Adaptive Moments
 │   └── shampoo.py        # Shampoo — Kronecker-factored second-order
+├── tests/
+│   ├── __init__.py
+│   ├── test_models.py    # 17 tests for MLP, ResNet18, and ViT
+│   ├── test_optimizers.py# 18 tests for all optimizers
+│   ├── test_metrics.py   # 9 tests for Hessian trace and sharpness
+│   └── test_train.py     # 28 tests for DATASET_INFO, build_model, and training loop
+├── .github/
+│   └── workflows/
+│       └── ci.yml        # GitHub Actions CI — runs all tests on push/PR
+├── requirements.txt      # Python dependencies
 ├── data/                 # Datasets downloaded here automatically
 ├── CHANGELOG.md          # History of all changes
 └── README.md
@@ -222,6 +234,53 @@ printf "3\n1,3\n3,5,6,7\n" | python benchmark.py --epochs 10 --save-plot adam_fa
 # Benchmark with a global LR override
 python benchmark.py --lr 0.001 --epochs 10
 ```
+
+---
+
+## Testing
+
+The project ships with 72 pytest tests covering every major component.
+
+### Run the tests locally
+
+```bash
+# Install pytest (one-time)
+pip install pytest
+
+# Run all tests with verbose output
+pytest tests/ -v
+
+# Run a single test file
+pytest tests/test_models.py -v
+
+# Run a single test class or function
+pytest tests/test_optimizers.py::TestShampoo -v
+pytest tests/test_train.py::TestTrainingLoop::test_loss_decreases_over_epochs -v
+```
+
+Expected output: `72 passed` in a few seconds (all on CPU, no downloads needed).
+
+### Test files
+
+| File | Tests | What it covers |
+|---|---|---|
+| `tests/test_models.py` | 17 | MLP, ResNet18, ViT forward passes; output shapes; patch size assertion |
+| `tests/test_optimizers.py` | 18 | Registry completeness; finite weights after one step for all 11 optimizers; optimizer-specific state and behaviour |
+| `tests/test_metrics.py` | 9 | Hessian trace (type, finiteness, positivity, NaN on no-param model); sharpness (type, non-negativity, weight restoration, epsilon monotonicity) |
+| `tests/test_train.py` | 28 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `linear_layer_names`/`weight_norms`; `train_one_epoch` return dict; loss decrease over 5 epochs |
+
+### CI pipeline
+
+Every push and pull request to `main` triggers the GitHub Actions workflow defined in `.github/workflows/ci.yml`:
+
+- **Runner**: `ubuntu-latest`, Python 3.12
+- **PyTorch**: CPU-only install (`--index-url https://download.pytorch.org/whl/cpu`) for fast execution
+- **Cache**: pip dependencies cached on `requirements.txt` hash
+- **Command**: `pytest tests/ -v`
+
+The badge below reflects the current status of the `main` branch:
+
+[![CI](https://github.com/honghaoyu12/OptimizerProject/actions/workflows/ci.yml/badge.svg)](https://github.com/honghaoyu12/OptimizerProject/actions/workflows/ci.yml)
 
 ---
 
