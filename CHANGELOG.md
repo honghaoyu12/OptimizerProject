@@ -4,6 +4,25 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 8 — CIFAR-100 Dataset
+
+### `train.py`
+- Added `"cifar100"` to `DATASET_INFO`: `{in_channels: 3, input_size: 3072, num_classes: 100}` (32×32 RGB, 100 classes).
+- Added CIFAR-100 normalization stats to `_DATASET_STATS`: mean=(0.5071, 0.4867, 0.4408), std=(0.2675, 0.2565, 0.2761).
+- `get_dataloaders()`: CIFAR-100 shares the CIFAR-10 augmentation pipeline (RandomCrop(32, padding=4) + RandomHorizontalFlip + Normalize) using `datasets.CIFAR100`.
+- `--dataset` CLI help updated to include `cifar100`.
+
+### `benchmark.py`
+- `DATASET_REGISTRY` extended with `("CIFAR-100", "cifar100")`.
+
+### `tests/test_train.py`
+- `test_all_datasets_present`: updated expected key set to include `"cifar100"`.
+- `test_dataset_metadata`: added `("cifar100", 3, 3072, 100)` parametrize case.
+- `test_mlp_all_datasets`, `test_resnet18_all_datasets`, `test_vit_all_datasets`: `"cifar100"` added to each.
+- Total tests: 76 (up from 72), all passing.
+
+---
+
 ## Round 7 — Test Suite and CI Pipeline
 
 ### New files: `tests/test_models.py`, `tests/test_optimizers.py`, `tests/test_metrics.py`, `tests/test_train.py`, `tests/__init__.py`
