@@ -181,15 +181,29 @@ A chronological record of everything discussed and built across all conversation
 
 ---
 
+---
+
+## Session 11 — CIFAR-100 Dataset
+
+**What we discussed:**
+- Adding CIFAR-100 as a fifth dataset (same image size as CIFAR-10 but 100 classes)
+
+**What was done:**
+- `train.py` — added `"cifar100"` to `DATASET_INFO` (32×32 RGB, 100 classes, input_size=3072); added normalization stats; `get_dataloaders()` handles CIFAR-100 via `datasets.CIFAR100` sharing the CIFAR-10 augmentation pipeline; CLI help updated
+- `benchmark.py` — `CIFAR-100` added to `DATASET_REGISTRY`
+- `tests/test_train.py` — `"cifar100"` added to all relevant parametrized tests; test count now 76 (up from 72)
+- `CHANGELOG.md` — Round 8 entry added
+
+---
+
 ## Current State (start of next session)
 
 | Component | Status |
 |---|---|
 | Models | MLP, ResNet-18, ViT |
-| Datasets | MNIST, FashionMNIST, CIFAR-10, Tiny ImageNet |
+| Datasets | MNIST, FashionMNIST, CIFAR-10, CIFAR-100, Tiny ImageNet |
 | Optimizers | 11 total |
-| Tests | 72 passing |
-| CI | GitHub Actions, green |
-| Active branch | `new_feature` (branched from `main`) |
+| Tests | 76 passing |
+| CI | GitHub Actions, green on `main` |
+| Active branch | `new_feature` (branched from `main`) — commit and push here, PR to merge into `main` when ready |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
-| Next step | Work on new features in `new_feature` branch, then open a PR to merge into `main` |
