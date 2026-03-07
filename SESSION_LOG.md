@@ -196,14 +196,37 @@ A chronological record of everything discussed and built across all conversation
 
 ---
 
+---
+
+## Session 12 — Synthetic Datasets
+
+**What we discussed:**
+- Adding 5 synthetic datasets designed to stress-test specific optimizer properties
+- Whether sklearn contained any of these (yes — `make_classification` and `make_moons` used)
+
+**What was built:**
+- `synthetic_datasets.py` (new) — 5 dataset generators + `SYNTHETIC_LOADERS` registry:
+  - `illcond`: ill-conditioned Gaussian (κ=1000), 64 features — tests curvature handling
+  - `sparse`: 5 informative out of 100 features via `make_classification` — tests coordinate adaptivity
+  - `noisy_grad`: 30% random label flips — tests stochastic robustness
+  - `manifold`: `make_moons` embedded in 64-D — tests nonconvex landscapes
+  - `saddle`: bimodal positive class at ±2 — tests escape from saddle points
+- `train.py` — 5 entries added to `DATASET_INFO` with `"tabular": True`; `get_dataloaders()` delegates to `SYNTHETIC_LOADERS`; `build_model()` raises for non-MLP on tabular data; CLI updated
+- `benchmark.py` — 5 synthetic datasets added to `DATASET_REGISTRY`; ResNet/ViT skipped gracefully for tabular datasets
+- `requirements.txt` — `scikit-learn>=1.3.0` added
+- `tests/test_synthetic.py` (new) — 45 tests covering registry, loader shapes, label validity, NaN checks, standardisation, reproducibility, dataset-specific properties
+- `tests/test_train.py` — updated for new dataset keys and tabular guard; test count 76 → 140
+
+---
+
 ## Current State (start of next session)
 
 | Component | Status |
 |---|---|
 | Models | MLP, ResNet-18, ViT |
-| Datasets | MNIST, FashionMNIST, CIFAR-10, CIFAR-100, Tiny ImageNet |
+| Datasets | MNIST, FashionMNIST, CIFAR-10, CIFAR-100, Tiny ImageNet + 5 synthetic (illcond, sparse, noisy_grad, manifold, saddle) |
 | Optimizers | 11 total |
-| Tests | 76 passing |
+| Tests | 140 passing |
 | CI | GitHub Actions, green on `main` |
 | Active branch | `new_feature` (branched from `main`) — commit and push here, PR to merge into `main` when ready |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |

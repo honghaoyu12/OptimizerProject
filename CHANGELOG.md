@@ -4,6 +4,51 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 9 — Synthetic Datasets
+
+### New file: `synthetic_datasets.py`
+
+Five synthetic tabular datasets for probing specific optimizer weaknesses. All datasets produce binary classification tasks, standardise features on the training split, and return `(train_loader, test_loader)` pairs.
+
+| Key | Shape | What it tests |
+|---|---|---|
+| `illcond` | (2000, 64) | **Curvature handling** — Gaussian features with covariance condition number = 1 000 (log-spaced eigenvalues). Adaptive curvature methods (Adam, Shampoo) should outperform SGD. |
+| `sparse` | (2000, 100) | **Coordinate adaptivity** — only 5 out of 100 features are informative (via `sklearn.make_classification`). Per-coordinate optimizers (Adagrad, Adam) should adapt faster. |
+| `noisy_grad` | (2000, 64) | **Stochastic robustness** — 30% random label flips injected after data generation. Momentum-based optimizers (Adam, NAdam) should be more robust. |
+| `manifold` | (2000, 64) | **Nonconvex landscapes** — `sklearn.make_moons` (2-D nonlinear) embedded in 64-D with 62 noise dimensions. Tests optimizers on curved decision boundaries. |
+| `saddle` | (2000, 64) | **Escape from flat regions** — bimodal positive class (±2) vs. tight negative cluster at origin. Creates saddle-point structure. Momentum and second-order methods should escape faster. |
+
+Internal `_to_loaders()` helper: standardises with train-split mean/std, splits 80/20 train/test, returns `DataLoader` pairs.
+`SYNTHETIC_LOADERS` registry mirrors the `OPTIMIZER_REGISTRY` pattern for easy lookup.
+
+### `train.py`
+- `DATASET_INFO` extended with all 5 synthetic keys; each entry includes `"tabular": True`.
+- `get_dataloaders()`: synthetic datasets are delegated to `SYNTHETIC_LOADERS` before the `_DATASET_STATS` lookup.
+- `build_model()`: raises `ValueError` if a non-MLP model is requested for a tabular dataset.
+- `--dataset` CLI help updated.
+
+### `benchmark.py`
+- `DATASET_REGISTRY` extended with all 5 synthetic datasets (labelled with `(synth)` suffix).
+- `run_benchmark()`: ResNet-18 and ViT are skipped with a printed message when a tabular dataset is selected; run counter advances correctly.
+
+### `requirements.txt`
+- Added `scikit-learn>=1.3.0` (used by `make_classification` and `make_moons`).
+
+### `tests/test_synthetic.py` (new)
+- 45 tests across 7 classes:
+  - `TestRegistry` — all keys present, all values callable.
+  - `TestLoaderOutputs` (parametrized across all 5 datasets) — returns two `DataLoader`s; correct feature shape; labels in `{0, 1}`; no NaN/Inf; train > test size; features approximately standardised; reproducible with same seed; different seeds differ.
+  - `TestIllcond`, `TestSparse`, `TestNoisyGrad`, `TestManifold`, `TestSaddle` — dataset-specific property checks.
+
+### `tests/test_train.py`
+- `test_all_datasets_present`: expected key set updated to include all 5 synthetic keys.
+- `test_dataset_metadata`: 5 new parametrize cases added.
+- `test_mlp_all_datasets`: all 5 synthetic datasets added.
+- `test_tabular_rejects_non_mlp`: new parametrized test — `resnet18` and `vit` raise `ValueError` for tabular datasets.
+- Total tests: 140 (up from 76).
+
+---
+
 ## Round 8 — CIFAR-100 Dataset
 
 ### `train.py`
