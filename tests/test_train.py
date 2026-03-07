@@ -33,12 +33,13 @@ def dummy_loader(n=64, in_channels=1, image_size=28, num_classes=10, batch_size=
 
 class TestDatasetInfo:
     def test_all_datasets_present(self):
-        assert set(DATASET_INFO.keys()) == {"mnist", "fashion_mnist", "cifar10", "tiny_imagenet"}
+        assert set(DATASET_INFO.keys()) == {"mnist", "fashion_mnist", "cifar10", "cifar100", "tiny_imagenet"}
 
     @pytest.mark.parametrize("key,in_ch,input_sz,n_cls", [
         ("mnist",         1, 784,   10),
         ("fashion_mnist", 1, 784,   10),
         ("cifar10",       3, 3072,  10),
+        ("cifar100",      3, 3072,  100),
         ("tiny_imagenet", 3, 12288, 200),
     ])
     def test_dataset_metadata(self, key, in_ch, input_sz, n_cls):
@@ -53,7 +54,7 @@ class TestDatasetInfo:
 # ---------------------------------------------------------------------------
 
 class TestBuildModel:
-    @pytest.mark.parametrize("dataset_key", ["mnist", "fashion_mnist", "cifar10", "tiny_imagenet"])
+    @pytest.mark.parametrize("dataset_key", ["mnist", "fashion_mnist", "cifar10", "cifar100", "tiny_imagenet"])
     def test_mlp_all_datasets(self, dataset_key):
         info = DATASET_INFO[dataset_key]
         model = build_model("mlp", info, hidden_sizes=[64, 32])
@@ -62,7 +63,7 @@ class TestBuildModel:
         out = model(x)
         assert out.shape == (2, info["num_classes"])
 
-    @pytest.mark.parametrize("dataset_key", ["mnist", "cifar10", "tiny_imagenet"])
+    @pytest.mark.parametrize("dataset_key", ["mnist", "cifar10", "cifar100", "tiny_imagenet"])
     def test_resnet18_all_datasets(self, dataset_key):
         info = DATASET_INFO[dataset_key]
         model = build_model("resnet18", info, hidden_sizes=[])
@@ -71,7 +72,7 @@ class TestBuildModel:
         out = model(x)
         assert out.shape == (2, info["num_classes"])
 
-    @pytest.mark.parametrize("dataset_key", ["mnist", "cifar10"])
+    @pytest.mark.parametrize("dataset_key", ["mnist", "cifar10", "cifar100"])
     def test_vit_all_datasets(self, dataset_key):
         info = DATASET_INFO[dataset_key]
         model = build_model("vit", info, hidden_sizes=[])

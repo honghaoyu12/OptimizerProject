@@ -70,6 +70,7 @@ DATASET_INFO: dict = {
     "mnist":          {"in_channels": 1, "input_size": 784,   "num_classes": 10},
     "fashion_mnist":  {"in_channels": 1, "input_size": 784,   "num_classes": 10},
     "cifar10":        {"in_channels": 3, "input_size": 3072,  "num_classes": 10},
+    "cifar100":       {"in_channels": 3, "input_size": 3072,  "num_classes": 100},
     "tiny_imagenet":  {"in_channels": 3, "input_size": 12288, "num_classes": 200},
 }
 
@@ -81,6 +82,7 @@ _DATASET_STATS = {
     "mnist":         ((0.1307,), (0.3081,)),
     "fashion_mnist": ((0.2860,), (0.3530,)),
     "cifar10":       ((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+    "cifar100":      ((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     "tiny_imagenet": ((0.4802, 0.4481, 0.3975), (0.2770, 0.2691, 0.2821)),
 }
 
@@ -162,7 +164,7 @@ def get_dataloaders(dataset: str = "mnist", batch_size: int = 128, data_dir: str
 
     mean, std = _DATASET_STATS[dataset]
 
-    if dataset == "cifar10":
+    if dataset in ("cifar10", "cifar100"):
         train_transform = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -173,8 +175,9 @@ def get_dataloaders(dataset: str = "mnist", batch_size: int = 128, data_dir: str
             transforms.ToTensor(),
             transforms.Normalize(mean, std),
         ])
-        train_set = datasets.CIFAR10(data_dir, train=True,  download=True, transform=train_transform)
-        test_set  = datasets.CIFAR10(data_dir, train=False, download=True, transform=test_transform)
+        cls = datasets.CIFAR10 if dataset == "cifar10" else datasets.CIFAR100
+        train_set = cls(data_dir, train=True,  download=True, transform=train_transform)
+        test_set  = cls(data_dir, train=False, download=True, transform=test_transform)
     elif dataset == "tiny_imagenet":
         root = _setup_tiny_imagenet(data_dir)
         train_transform = transforms.Compose([
@@ -465,7 +468,7 @@ def run_training(
 
 def parse_args():
     p = argparse.ArgumentParser(description="Single-run trainer (MNIST / FashionMNIST / CIFAR-10)")
-    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | tiny_imagenet")
+    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet")
     p.add_argument("--model",        default="mlp",      help="mlp | resnet18 | vit")
     p.add_argument("--optimizer",    default="adam",     help="Optimizer name (see OPTIMIZER_REGISTRY)")
     p.add_argument("--lr",           default=1e-3,       type=float, help="Learning rate")

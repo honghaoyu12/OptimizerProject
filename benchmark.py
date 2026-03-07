@@ -32,6 +32,7 @@ DATASET_REGISTRY: OrderedDict = OrderedDict([
     ("MNIST",          "mnist"),
     ("Fashion MNIST",  "fashion_mnist"),
     ("CIFAR-10",       "cifar10"),
+    ("CIFAR-100",      "cifar100"),
     ("Tiny ImageNet",  "tiny_imagenet"),
 ])
 
