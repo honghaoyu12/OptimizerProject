@@ -33,7 +33,10 @@ def dummy_loader(n=64, in_channels=1, image_size=28, num_classes=10, batch_size=
 
 class TestDatasetInfo:
     def test_all_datasets_present(self):
-        assert set(DATASET_INFO.keys()) == {"mnist", "fashion_mnist", "cifar10", "cifar100", "tiny_imagenet"}
+        assert set(DATASET_INFO.keys()) == {
+            "mnist", "fashion_mnist", "cifar10", "cifar100", "tiny_imagenet",
+            "illcond", "sparse", "noisy_grad", "manifold", "saddle",
+        }
 
     @pytest.mark.parametrize("key,in_ch,input_sz,n_cls", [
         ("mnist",         1, 784,   10),
@@ -41,6 +44,11 @@ class TestDatasetInfo:
         ("cifar10",       3, 3072,  10),
         ("cifar100",      3, 3072,  100),
         ("tiny_imagenet", 3, 12288, 200),
+        ("illcond",       1, 64,    2),
+        ("sparse",        1, 100,   2),
+        ("noisy_grad",    1, 64,    2),
+        ("manifold",      1, 64,    2),
+        ("saddle",        1, 64,    2),
     ])
     def test_dataset_metadata(self, key, in_ch, input_sz, n_cls):
         info = DATASET_INFO[key]
@@ -54,7 +62,10 @@ class TestDatasetInfo:
 # ---------------------------------------------------------------------------
 
 class TestBuildModel:
-    @pytest.mark.parametrize("dataset_key", ["mnist", "fashion_mnist", "cifar10", "cifar100", "tiny_imagenet"])
+    @pytest.mark.parametrize("dataset_key", [
+        "mnist", "fashion_mnist", "cifar10", "cifar100", "tiny_imagenet",
+        "illcond", "sparse", "noisy_grad", "manifold", "saddle",
+    ])
     def test_mlp_all_datasets(self, dataset_key):
         info = DATASET_INFO[dataset_key]
         model = build_model("mlp", info, hidden_sizes=[64, 32])
@@ -84,6 +95,11 @@ class TestBuildModel:
     def test_unknown_model_raises(self):
         with pytest.raises(ValueError, match="Unknown model"):
             build_model("transformer_xl", DATASET_INFO["mnist"], hidden_sizes=[])
+
+    @pytest.mark.parametrize("model_name", ["resnet18", "vit"])
+    def test_tabular_rejects_non_mlp(self, model_name):
+        with pytest.raises(ValueError, match="not supported for tabular"):
+            build_model(model_name, DATASET_INFO["illcond"], hidden_sizes=[])
 
 
 # ---------------------------------------------------------------------------

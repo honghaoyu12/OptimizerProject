@@ -29,11 +29,17 @@ from visualizer import plot_benchmark
 # ---------------------------------------------------------------------------
 
 DATASET_REGISTRY: OrderedDict = OrderedDict([
-    ("MNIST",          "mnist"),
-    ("Fashion MNIST",  "fashion_mnist"),
-    ("CIFAR-10",       "cifar10"),
-    ("CIFAR-100",      "cifar100"),
-    ("Tiny ImageNet",  "tiny_imagenet"),
+    ("MNIST",                     "mnist"),
+    ("Fashion MNIST",             "fashion_mnist"),
+    ("CIFAR-10",                  "cifar10"),
+    ("CIFAR-100",                 "cifar100"),
+    ("Tiny ImageNet",             "tiny_imagenet"),
+    # Synthetic datasets (MLP only)
+    ("Ill-Conditioned (synth)",   "illcond"),
+    ("Sparse Signal (synth)",     "sparse"),
+    ("Noisy Gradient (synth)",    "noisy_grad"),
+    ("Nonlinear Manifold (synth)","manifold"),
+    ("Saddle Point (synth)",      "saddle"),
 ])
 
 MODEL_REGISTRY: OrderedDict = OrderedDict([
@@ -204,6 +210,10 @@ def run_benchmark(
         train_loader, test_loader = get_dataloaders(ds_key, batch_size, data_dir)
 
         for mdl_name in model_names:
+            if ds_info.get("tabular") and mdl_name != "MLP":
+                print(f"\n  Skipping {mdl_name} for tabular dataset '{ds_name}' (MLP only).")
+                run_idx += len(optimizer_names)
+                continue
             mdl_info = MODEL_REGISTRY[mdl_name]
 
             for opt_name in optimizer_names:

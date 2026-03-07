@@ -67,11 +67,18 @@ def build_optimizer(name: str, params, lr: float):
 # ---------------------------------------------------------------------------
 
 DATASET_INFO: dict = {
+    # Image datasets
     "mnist":          {"in_channels": 1, "input_size": 784,   "num_classes": 10},
     "fashion_mnist":  {"in_channels": 1, "input_size": 784,   "num_classes": 10},
     "cifar10":        {"in_channels": 3, "input_size": 3072,  "num_classes": 10},
     "cifar100":       {"in_channels": 3, "input_size": 3072,  "num_classes": 100},
     "tiny_imagenet":  {"in_channels": 3, "input_size": 12288, "num_classes": 200},
+    # Synthetic tabular datasets (MLP only)
+    "illcond":        {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "sparse":         {"in_channels": 1, "input_size": 100,   "num_classes": 2,  "tabular": True},
+    "noisy_grad":     {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "manifold":       {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "saddle":         {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
 }
 
 # ---------------------------------------------------------------------------
@@ -162,6 +169,11 @@ def get_dataloaders(dataset: str = "mnist", batch_size: int = 128, data_dir: str
     if dataset not in DATASET_INFO:
         raise ValueError(f"Unknown dataset '{dataset}'. Choose from {list(DATASET_INFO)}")
 
+    # Synthetic tabular datasets are self-normalising — delegate immediately
+    if DATASET_INFO[dataset].get("tabular"):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        return SYNTHETIC_LOADERS[dataset](batch_size=batch_size)
+
     mean, std = _DATASET_STATS[dataset]
 
     if dataset in ("cifar10", "cifar100"):
@@ -220,6 +232,10 @@ def build_model(model_name: str, dataset_info: dict, hidden_sizes: list[int]) ->
     hidden_sizes : hidden layer widths (only used by MLP)
     """
     name = model_name.lower()
+    if dataset_info.get("tabular") and name != "mlp":
+        raise ValueError(
+            f"Model '{model_name}' is not supported for tabular datasets. Use MLP."
+        )
     if name == "mlp":
         return MLP(
             input_size=dataset_info["input_size"],
@@ -468,7 +484,7 @@ def run_training(
 
 def parse_args():
     p = argparse.ArgumentParser(description="Single-run trainer (MNIST / FashionMNIST / CIFAR-10)")
-    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet")
+    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet | illcond | sparse | noisy_grad | manifold | saddle")
     p.add_argument("--model",        default="mlp",      help="mlp | resnet18 | vit")
     p.add_argument("--optimizer",    default="adam",     help="Optimizer name (see OPTIMIZER_REGISTRY)")
     p.add_argument("--lr",           default=1e-3,       type=float, help="Learning rate")
