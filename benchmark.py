@@ -21,7 +21,7 @@ import torch.nn as nn
 from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo
-from train import DATASET_INFO, get_dataloaders, linear_layer_names, run_training
+from train import DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders, linear_layer_names, run_training
 from visualizer import plot_benchmark
 
 
@@ -193,6 +193,8 @@ def run_benchmark(
     device: torch.device,
     lr_override: float | None,
     logger: TrainingLogger | None = None,
+    scheduler_name: str = "none",
+    warmup_epochs: int = 5,
 ) -> dict:
     """Train every (dataset, model, optimizer) triple and collect histories.
 
@@ -230,11 +232,13 @@ def run_benchmark(
                 model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
                 optimizer = opt_info["factory"](model.parameters(), lr)
                 layer_names = linear_layer_names(model)
+                scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
 
                 history = run_training(
                     model, train_loader, test_loader,
                     optimizer, criterion, device,
                     epochs, layer_names, verbose=True,
+                    scheduler=scheduler,
                 )
                 results[(ds_name, mdl_name, opt_name)] = history
 
@@ -246,6 +250,7 @@ def run_benchmark(
                         "lr":         lr,
                         "epochs":     epochs,
                         "batch_size": batch_size,
+                        "scheduler":  scheduler_name,
                     }
                     logger.log_run(config, history)
 
@@ -271,6 +276,11 @@ def parse_args():
                    help="Path to save comparison figure ('' to disable)")
     p.add_argument("--log-dir",      default="logs",
                    help="Root directory for training logs (default: logs/)")
+    p.add_argument("--scheduler",    default="none",
+                   choices=list(SCHEDULER_REGISTRY.keys()),
+                   help="LR scheduler: none | cosine | step | warmup_cosine")
+    p.add_argument("--warmup-epochs", default=5, type=int,
+                   help="Linear warmup epochs for warmup_cosine (default: 5)")
     return p.parse_args()
 
 
@@ -306,6 +316,8 @@ def main():
         device=device,
         lr_override=args.lr,
         logger=logger,
+        scheduler_name=args.scheduler,
+        warmup_epochs=args.warmup_epochs,
     )
     logger.close()
 

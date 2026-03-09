@@ -52,6 +52,32 @@ OPTIMIZER_REGISTRY: dict = {
     # "my_optimizer": lambda p, lr: MyOptimizer(p, lr=lr),
 }
 
+# ---------------------------------------------------------------------------
+# Scheduler registry
+# ---------------------------------------------------------------------------
+
+SCHEDULER_REGISTRY: dict = {
+    "none": lambda opt, epochs, warmup: None,
+    "cosine": lambda opt, epochs, warmup: torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=epochs, eta_min=0.0
+    ),
+    "step": lambda opt, epochs, warmup: torch.optim.lr_scheduler.StepLR(
+        opt, step_size=max(1, epochs // 3), gamma=0.1
+    ),
+    "warmup_cosine": lambda opt, epochs, warmup: torch.optim.lr_scheduler.SequentialLR(
+        opt,
+        schedulers=[
+            torch.optim.lr_scheduler.LinearLR(
+                opt, start_factor=1e-3, end_factor=1.0, total_iters=max(1, warmup)
+            ),
+            torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt, T_max=max(1, epochs - warmup), eta_min=0.0
+            ),
+        ],
+        milestones=[max(1, warmup)],
+    ),
+}
+
 
 def build_optimizer(name: str, params, lr: float):
     name = name.lower()
@@ -382,6 +408,7 @@ def run_training(
     device, epochs, layer_names, verbose=True,
     compute_hessian: bool = False,
     target_acc: float = 0.95,
+    scheduler=None,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -400,6 +427,7 @@ def run_training(
         hessian_trace              : list[float]  — NaN if compute_hessian=False
         sharpness                  : list[float]  — NaN if compute_hessian=False
         step_losses                : list[float]  — all batch-level losses across epochs
+        learning_rates             : list[float]  — LR at start of each epoch
     """
     from metrics import compute_hessian_trace, compute_sharpness
 
@@ -416,6 +444,7 @@ def run_training(
         "hessian_trace": [],
         "sharpness": [],
         "step_losses": [],
+        "learning_rates": [],
     }
 
     # Fixed batch for Hessian/sharpness (reuse same batch each epoch)
@@ -430,6 +459,9 @@ def run_training(
     global_step_offset = 0
 
     for epoch in range(1, epochs + 1):
+        # Record LR before this epoch's training
+        history["learning_rates"].append(optimizer.param_groups[0]["lr"])
+
         epoch_result = train_one_epoch(
             model, train_loader, optimizer, criterion, device, layer_names,
             global_step_offset=global_step_offset,
@@ -469,6 +501,9 @@ def run_training(
         history["hessian_trace"].append(ht)
         history["sharpness"].append(sh)
 
+        if scheduler is not None:
+            scheduler.step()
+
         if verbose:
             print(
                 f"  Epoch {epoch:>3}/{epochs} | "
@@ -504,6 +539,11 @@ def parse_args():
                    help="Root directory for training logs (default: logs/)")
     p.add_argument("--hessian",      action="store_true",
                    help="Compute Hessian trace and sharpness each epoch (slow)")
+    p.add_argument("--scheduler",    default="none",
+                   choices=list(SCHEDULER_REGISTRY.keys()),
+                   help="LR scheduler: none | cosine | step | warmup_cosine")
+    p.add_argument("--warmup-epochs", default=5, type=int,
+                   help="Linear warmup epochs for warmup_cosine (default: 5)")
     return p.parse_args()
 
 
@@ -535,7 +575,9 @@ def main():
     train_loader, test_loader = get_dataloaders(args.dataset, args.batch_size, args.data_dir)
     optimizer = build_optimizer(args.optimizer, model.parameters(), args.lr)
     criterion = nn.CrossEntropyLoss()
+    scheduler = SCHEDULER_REGISTRY[args.scheduler](optimizer, args.epochs, args.warmup_epochs)
     print(f"Optimizer    : {optimizer.__class__.__name__}  (lr={args.lr})")
+    print(f"Scheduler    : {args.scheduler}")
     print()
 
     # Visualizer
@@ -558,10 +600,14 @@ def main():
         "train_loss": [], "train_acc": [],
         "test_loss":  [], "test_acc":  [],
         "time_elapsed": [], "step_losses": [],
+        "learning_rates": [],
     }
     run_start = time.time()
 
     for epoch in range(1, args.epochs + 1):
+        current_lr = optimizer.param_groups[0]["lr"]
+        history["learning_rates"].append(current_lr)
+
         epoch_result = train_one_epoch(
             model, train_loader, optimizer, criterion, device, layer_names
         )
@@ -598,20 +644,25 @@ def main():
                 step_losses=epoch_result["step_losses"],
                 hessian_trace=ht,
                 sharpness=sh,
+                learning_rate=current_lr,
             )
+
+        if scheduler is not None:
+            scheduler.step()
 
     if vis is not None:
         vis.close()
 
     # Write logs
     config = {
-        "dataset":     args.dataset,
-        "model":       args.model,
-        "optimizer":   args.optimizer,
-        "lr":          args.lr,
-        "epochs":      args.epochs,
-        "batch_size":  args.batch_size,
+        "dataset":      args.dataset,
+        "model":        args.model,
+        "optimizer":    args.optimizer,
+        "lr":           args.lr,
+        "epochs":       args.epochs,
+        "batch_size":   args.batch_size,
         "hidden_sizes": args.hidden_sizes,
+        "scheduler":    args.scheduler,
     }
     logger = TrainingLogger(log_dir=args.log_dir)
     logger.log_run(config, history)

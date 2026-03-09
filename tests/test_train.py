@@ -8,10 +8,12 @@ from torch.utils.data import DataLoader, TensorDataset
 from train import (
     DATASET_INFO,
     OPTIMIZER_REGISTRY,
+    SCHEDULER_REGISTRY,
     build_model,
     build_optimizer,
     evaluate,
     linear_layer_names,
+    run_training,
     train_one_epoch,
     weight_norms,
 )
@@ -184,3 +186,83 @@ class TestTrainingLoop:
             r = train_one_epoch(model, loader, opt, crit, device, names)
             losses.append(r["loss"])
         assert losses[-1] < losses[0], "Loss did not decrease over 5 epochs"
+
+
+# ---------------------------------------------------------------------------
+# Scheduler registry
+# ---------------------------------------------------------------------------
+
+class TestSchedulers:
+    def _make_opt(self, lr=0.1):
+        """Return a tiny model and SGD optimizer for scheduler tests."""
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+        return optimizer
+
+    def test_registry_has_all_keys(self):
+        assert set(SCHEDULER_REGISTRY.keys()) == {"none", "cosine", "step", "warmup_cosine"}
+
+    def test_none_returns_none(self):
+        opt = self._make_opt()
+        result = SCHEDULER_REGISTRY["none"](opt, 10, 5)
+        assert result is None
+
+    def test_cosine_lr_decreases(self):
+        opt = self._make_opt(lr=0.1)
+        scheduler = SCHEDULER_REGISTRY["cosine"](opt, 10, 0)
+        initial_lr = opt.param_groups[0]["lr"]
+        for _ in range(10):
+            scheduler.step()
+        final_lr = opt.param_groups[0]["lr"]
+        assert final_lr < initial_lr
+
+    def test_warmup_lr_increases_then_decreases(self):
+        opt = self._make_opt(lr=0.1)
+        epochs, warmup = 10, 3
+        scheduler = SCHEDULER_REGISTRY["warmup_cosine"](opt, epochs, warmup)
+        # Step through warmup — LR should rise
+        for _ in range(warmup):
+            scheduler.step()
+        peak_lr = opt.param_groups[0]["lr"]
+        # Step through remaining epochs — LR should then decay
+        for _ in range(epochs - warmup):
+            scheduler.step()
+        final_lr = opt.param_groups[0]["lr"]
+        assert final_lr < peak_lr
+
+    def test_run_training_records_learning_rates(self):
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16]).to(device)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = SCHEDULER_REGISTRY["cosine"](optimizer, 3, 0)
+        criterion = nn.CrossEntropyLoss()
+        loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10)
+        layer_names = linear_layer_names(model)
+
+        history = run_training(
+            model, loader, loader, optimizer, criterion,
+            device, epochs=3, layer_names=layer_names,
+            verbose=False, scheduler=scheduler,
+        )
+        assert len(history["learning_rates"]) == 3
+        # Cosine decay: first LR >= last LR
+        assert history["learning_rates"][0] >= history["learning_rates"][-1]
+
+    def test_run_training_no_scheduler_constant_lr(self):
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16]).to(device)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
+        criterion = nn.CrossEntropyLoss()
+        loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10)
+        layer_names = linear_layer_names(model)
+
+        history = run_training(
+            model, loader, loader, optimizer, criterion,
+            device, epochs=3, layer_names=layer_names,
+            verbose=False, scheduler=None,
+        )
+        lrs = history["learning_rates"]
+        assert len(lrs) == 3
+        assert all(lr == lrs[0] for lr in lrs), "LR should be constant with no scheduler"
