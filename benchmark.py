@@ -18,6 +18,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 
+from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo
 from train import DATASET_INFO, get_dataloaders, linear_layer_names, run_training
@@ -191,6 +192,7 @@ def run_benchmark(
     data_dir: str,
     device: torch.device,
     lr_override: float | None,
+    logger: TrainingLogger | None = None,
 ) -> dict:
     """Train every (dataset, model, optimizer) triple and collect histories.
 
@@ -236,6 +238,17 @@ def run_benchmark(
                 )
                 results[(ds_name, mdl_name, opt_name)] = history
 
+                if logger is not None:
+                    config = {
+                        "dataset":    ds_key,
+                        "model":      mdl_name,
+                        "optimizer":  opt_name,
+                        "lr":         lr,
+                        "epochs":     epochs,
+                        "batch_size": batch_size,
+                    }
+                    logger.log_run(config, history)
+
     return results
 
 
@@ -254,8 +267,10 @@ def parse_args():
                    help="Override all optimizer default LRs (omit to use per-optimizer defaults)")
     p.add_argument("--data-dir",     default="./data")
     p.add_argument("--device",       default="auto",     help="cpu | cuda | mps | auto")
-    p.add_argument("--save-plot",    default="benchmark.png",
+    p.add_argument("--save-plot",    default="plots/benchmark.png",
                    help="Path to save comparison figure ('' to disable)")
+    p.add_argument("--log-dir",      default="logs",
+                   help="Root directory for training logs (default: logs/)")
     return p.parse_args()
 
 
@@ -281,6 +296,7 @@ def main():
     print(f"  Selected optimizers : {', '.join(optimizer_names)}")
 
     # ── Run ───────────────────────────────────────────────────────────────
+    logger = TrainingLogger(log_dir=args.log_dir)
     results = run_benchmark(
         dataset_names, model_names, optimizer_names,
         hidden_sizes=args.hidden_sizes,
@@ -289,7 +305,9 @@ def main():
         data_dir=args.data_dir,
         device=device,
         lr_override=args.lr,
+        logger=logger,
     )
+    logger.close()
 
     # ── Plot ──────────────────────────────────────────────────────────────
     opt_colors = {name: OPTIMIZER_REGISTRY[name]["color"] for name in optimizer_names}

@@ -19,6 +19,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
+from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from visualizer import Visualizer
 
@@ -497,8 +498,10 @@ def parse_args():
     p.add_argument("--data-dir",     default="./data")
     p.add_argument("--device",       default="auto",     help="cpu | cuda | mps | auto")
     p.add_argument("--no-plot",      action="store_true", help="Disable live visualisation")
-    p.add_argument("--save-plot",    default="training_curves.png",
+    p.add_argument("--save-plot",    default="plots/training_curves.png",
                    help="Path to save the final training figure ('' to disable)")
+    p.add_argument("--log-dir",      default="logs",
+                   help="Root directory for training logs (default: logs/)")
     p.add_argument("--hessian",      action="store_true",
                    help="Compute Hessian trace and sharpness each epoch (slow)")
     return p.parse_args()
@@ -550,6 +553,14 @@ def main():
     from metrics import compute_hessian_trace, compute_sharpness
     criterion_diag = nn.CrossEntropyLoss()
 
+    # History collected for logging
+    history = {
+        "train_loss": [], "train_acc": [],
+        "test_loss":  [], "test_acc":  [],
+        "time_elapsed": [], "step_losses": [],
+    }
+    run_start = time.time()
+
     for epoch in range(1, args.epochs + 1):
         epoch_result = train_one_epoch(
             model, train_loader, optimizer, criterion, device, layer_names
@@ -571,6 +582,13 @@ def main():
             f"test  loss {test_loss:.4f}  acc {test_acc*100:.2f}%"
         )
 
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
+        history["test_loss"].append(test_loss)
+        history["test_acc"].append(test_acc)
+        history["time_elapsed"].append(time.time() - run_start)
+        history["step_losses"].extend(epoch_result["step_losses"])
+
         if vis is not None:
             vis.update(
                 epoch, train_loss, test_loss, train_acc, test_acc,
@@ -584,6 +602,20 @@ def main():
 
     if vis is not None:
         vis.close()
+
+    # Write logs
+    config = {
+        "dataset":     args.dataset,
+        "model":       args.model,
+        "optimizer":   args.optimizer,
+        "lr":          args.lr,
+        "epochs":      args.epochs,
+        "batch_size":  args.batch_size,
+        "hidden_sizes": args.hidden_sizes,
+    }
+    logger = TrainingLogger(log_dir=args.log_dir)
+    logger.log_run(config, history)
+    logger.close()
 
 
 if __name__ == "__main__":
