@@ -33,7 +33,7 @@ jobs:
 
       - name: Install remaining dependencies
         run: |
-          pip install matplotlib pytest
+          pip install -r requirements.txt pytest
 
       - name: Run tests
         run: |
