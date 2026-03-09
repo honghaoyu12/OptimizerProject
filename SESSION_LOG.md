@@ -262,6 +262,27 @@ All 140 tests still passing.
 
 ---
 
+---
+
+## Session 15 — Debug and Test Pass
+
+**What we discussed:**
+- Running a full debug-and-test pass after the logger and plot enforcement changes from Session 14
+
+**Training runs completed (all clean):**
+- MNIST / MLP / Adam → 97.97% test acc
+- FashionMNIST / MLP / AdamW → 88.23%
+- FashionMNIST / MLP / Lion → 85.90%
+- MNIST / MLP / Shampoo → 97.96%
+- MNIST / ResNet-18 / SGD → 98.72%
+
+**Verified:**
+- All plots saved to `plots/training_curves.png` (no stray files in project root)
+- Each run creates `logs/<YYYY-MM-DD_HH-MM-SS>/` with `run_summary.log` + per-run `.log` containing epoch-wise CSV and batch-wise step losses
+- All 140 tests continue to pass
+
+---
+
 ## Current State (start of next session)
 
 | Component | Status |
