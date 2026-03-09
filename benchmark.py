@@ -21,7 +21,7 @@ import torch.nn as nn
 from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo
-from train import DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders, linear_layer_names, run_training
+from train import DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders, linear_layer_names, run_training, set_seed
 from visualizer import plot_benchmark
 
 
@@ -199,6 +199,7 @@ def run_benchmark(
     min_delta: float = 0.0,
     max_grad_norm: float | None = None,
     weight_decays: list[float] | None = None,
+    seed: int | None = None,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -269,6 +270,7 @@ def run_benchmark(
                             "min_delta":     min_delta,
                             "max_grad_norm": max_grad_norm,
                             "weight_decay":  wd,
+                            "seed":          seed,
                         }
                         logger.log_run(config, history)
 
@@ -307,11 +309,17 @@ def parse_args():
                    help="Clip global gradient norm to this value (None = disabled)")
     p.add_argument("--weight-decays", default=[0.0], type=float, nargs="+",
                    help="Weight decay values to sweep (e.g. --weight-decays 0 1e-4 1e-3)")
+    p.add_argument("--seed", default=None, type=int,
+                   help="Random seed for reproducibility (default: None, non-deterministic)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.seed is not None:
+        set_seed(args.seed)
+
     device = get_device(args.device)
 
     print(f"\n  Device       : {device}")
@@ -363,6 +371,7 @@ def main():
         min_delta=args.min_delta,
         max_grad_norm=args.max_grad_norm,
         weight_decays=args.weight_decays,
+        seed=args.seed,
     )
     logger.close()
 

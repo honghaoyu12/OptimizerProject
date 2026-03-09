@@ -9,6 +9,7 @@ Custom optimizer  : add your class to optimizers/ and register it below.
 
 import argparse
 import os
+import random
 import shutil
 import time
 import urllib.request
@@ -32,7 +33,23 @@ from visualizer import Visualizer
 #   3. Add an entry to OPTIMIZER_REGISTRY.
 # ---------------------------------------------------------------------------
 
+import numpy as np
+
 from optimizers import VanillaSGD, Lion, LAMB, Shampoo
+
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+
+def set_seed(seed: int) -> None:
+    """Fix all relevant random seeds for reproducible runs."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 OPTIMIZER_REGISTRY: dict = {
     # PyTorch built-ins
@@ -617,11 +634,16 @@ def parse_args():
                    help="Clip global gradient norm to this value (None = disabled)")
     p.add_argument("--weight-decay", default=0.0, type=float,
                    help="L2 weight decay coefficient (default: 0.0, disabled)")
+    p.add_argument("--seed", default=None, type=int,
+                   help="Random seed for reproducibility (default: None, non-deterministic)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.seed is not None:
+        set_seed(args.seed)
 
     # Device selection
     if args.device == "auto":
@@ -657,6 +679,8 @@ def main():
         print(f"Grad clipping : max_norm={args.max_grad_norm}")
     if args.weight_decay > 0.0:
         print(f"Weight decay  : {args.weight_decay:g}")
+    if args.seed is not None:
+        print(f"Seed          : {args.seed}")
     print()
 
     # Visualizer
@@ -756,6 +780,7 @@ def main():
         "min_delta":     args.min_delta,
         "max_grad_norm": args.max_grad_norm,
         "weight_decay":  args.weight_decay,
+        "seed":          args.seed,
     }
     logger = TrainingLogger(log_dir=args.log_dir)
     logger.log_run(config, history)
