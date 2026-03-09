@@ -4,6 +4,103 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 14 — LR Range Test (LRFinder)
+
+### New file: `lr_finder.py`
+
+`LRFinder` class — self-contained, no dependency on `train.py`.
+
+- `__init__(model, optimizer, criterion, device, start_lr=1e-7, end_lr=10.0, num_iter=100, smooth_f=0.05, diverge_th=5.0)`
+- `run(loader)` — ramps LR exponentially, records EMA-smoothed loss, stops early on divergence; model and optimizer state unconditionally restored via `finally` block; supports AdaHessian via `requires_create_graph` flag
+- `suggestion()` — returns LR at the steepest negative loss gradient
+- `plot(save_path=None)` — log-scale loss vs LR figure with red dashed vertical line at suggested LR; returns suggestion
+
+### `train.py`
+- Added `from lr_finder import LRFinder` import.
+- Three new CLI flags: `--find-lr` (store_true), `--find-lr-iters` (default 100), `--find-lr-plot` (default None).
+- Pre-training block in `main()`: when `--find-lr` is set, constructs `LRFinder`, runs it, prints suggested LR, optionally saves the plot — all before the training loop starts.
+
+### `tests/test_lr_finder.py` (new)
+- 7 tests across 4 classes:
+  - `TestLRFinderBasic` — history keys, length match, monotone LR schedule
+  - `TestLRFinderStateRestoration` — model weights and optimizer LR restored after run
+  - `TestLRFinderSuggestion` — suggestion is a float within `[start_lr, end_lr]`
+  - `TestLRFinderAdaHessian` — completes with AdaHessian; all losses finite
+
+Total tests: 234 (up from 227).
+
+---
+
+## Round 13 — Schedulers, Early Stopping, Gradient Clipping, Checkpoints, and Log-Replay Plotting
+
+### `train.py`
+- **Scheduler registry** — `SCHEDULER_REGISTRY` with four entries: `none`, `cosine` (CosineAnnealingLR), `step` (StepLR, gamma=0.1 every epochs//3 steps), `warmup_cosine` (SequentialLR: LinearLR warmup + CosineAnnealingLR decay).
+- **`EarlyStopping` class** — `patience=0` disables (default). `step(val_loss, model)` saves best-epoch weights and returns True when patience is exhausted. `restore(model, device)` loads best-epoch weights back.
+- **`run_training()` updates** — accepts `scheduler`, `patience`, `min_delta`, `max_grad_norm` args; history gains `"learning_rates"` (LR at epoch start) and `"early_stopped_epoch"` (int or None) and `"grad_norm_before_clip"` (pre-clip global norm per epoch).
+- **`train_one_epoch()` updates** — accepts `max_grad_norm`; accumulates pre-clip per-param norms; calls `clip_grad_norm_` when set; returns both `grad_norm_before_clip` and `grad_norm_global`.
+- **New CLI flags** — `--scheduler`, `--warmup-epochs`, `--patience`, `--min-delta`, `--max-grad-norm`, `--weight-decay`, `--seed`, `--checkpoint-dir`.
+- **`Visualizer.update()`** — accepts `learning_rate` kwarg; overlays LR trace on the Loss vs Epoch panel.
+
+### `benchmark.py`
+- `run_benchmark()` accepts `scheduler_name`, `warmup_epochs`, `patience`, `min_delta`, `max_grad_norm`, `weight_decays`, `seed`, `checkpoint_dir`.
+- New CLI flags mirroring `train.py`: `--scheduler`, `--warmup-epochs`, `--patience`, `--min-delta`, `--max-grad-norm`, `--weight-decays` (nargs="+", allows weight-decay sweep), `--seed`, `--checkpoint-dir`.
+
+### `visualizer.py`
+- `plot_benchmark()` gains a fifth column: **LR vs Epoch**.
+
+### `tests/test_train.py`
+- Added `TestSchedulers` (4 tests), `TestEarlyStopping` (5 tests), `TestGradientClipping` (4 tests), `TestSeed` (3 tests).
+- Total tests: 68 (up from ~52 after previous additions).
+
+### `tests/test_checkpoints.py` (new)
+- 5 tests: checkpoint directory created on run; `best.pt` and `final.pt` written; restored model produces same outputs; partial-epoch best tracking.
+
+### `tests/test_plot_from_logs.py` (new)
+- 9 tests: log directory discovery; CSV parsing; per-run plot generation; multi-run overlay; edge cases (empty log dir, missing keys).
+
+Total tests: 227 (up from 190).
+
+---
+
+## Round 12 — Muon, Adan, and AdaHessian Optimizers
+
+### New files: `optimizers/muon.py`, `optimizers/adan.py`, `optimizers/adahessian.py`
+
+**`Muon`** (Kosson et al., 2024)
+- Nesterov momentum with Gram-Schmidt orthogonalisation of the update matrix before applying it.
+- Per-parameter orthogonalisation via `torch.linalg.svd`; 1-D params (bias, BatchNorm) fall back to plain SGD.
+- Default lr=0.02; weight_decay applied to non-1-D params only.
+
+**`Adan`** (Adaptive Nesterov Momentum, Xie et al., 2023)
+- Maintains three EMA terms: gradient (`m1`), gradient difference (`m2`), squared gradient difference (`m3`).
+- Update direction incorporates Nesterov look-ahead from the difference term; element-wise preconditioned by `m3`.
+- Default lr=1e-3, betas=(0.98, 0.92, 0.99), eps=1e-8.
+
+**`AdaHessian`** (Yao et al., 2021)
+- Estimates the Hessian diagonal using the Hutchinson estimator (random ±1 vectors, `create_graph=True` backward).
+- Per-parameter EMA Hessian diagonal used as preconditioner (similar to RMSprop but second-order).
+- `requires_create_graph: bool = True` class attribute — detected by `train_one_epoch()` and `LRFinder.run()` to use `autograd.grad(create_graph=True)` instead of `.backward()`.
+- Default lr=0.1.
+
+### `optimizers/__init__.py`
+- Exports `Muon`, `Adan`, `AdaHessian`.
+
+### `train.py`
+- `OPTIMIZER_REGISTRY` extended: `"muon"`, `"adan"`, `"adahessian"` entries added (14 total).
+- `train_one_epoch()` checks `getattr(optimizer, "requires_create_graph", False)` to use `autograd.grad` path.
+
+### `benchmark.py`
+- `OPTIMIZER_REGISTRY` extended: `Muon` (magenta, lr=0.02), `Adan` (olive, lr=0.001), `AdaHessian` (gold, lr=0.1). Total: 13 entries.
+
+### `tests/test_optimizers.py`
+- Registry completeness test updated to expect 14 entries.
+- 19 new tests added for Muon, Adan, and AdaHessian (one-step finite-weight; optimizer-specific state; AdaHessian `create_graph` path).
+- Total: 37 tests (up from 18).
+
+Total tests: 190 (up from 140).
+
+---
+
 ## Round 11 — Training Logger and Plot Directory Enforcement
 
 ### New file: `logger.py`

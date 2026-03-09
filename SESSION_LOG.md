@@ -283,7 +283,7 @@ All 140 tests still passing.
 
 ---
 
-## Current State (start of next session)
+## Current State After Session 15
 
 | Component | Status |
 |---|---|
@@ -292,6 +292,91 @@ All 140 tests still passing.
 | Optimizers | 11 total |
 | Tests | 140 passing |
 | CI | GitHub Actions, green on `main` |
-| Active branch | `new_feature` (branched from `main`) — commit and push here, PR to merge into `main` when ready |
+| GitHub | https://github.com/honghaoyu12/OptimizerProject |
+| Known bugs | None |
+
+---
+
+## Session 16 — Muon, Adan, and AdaHessian Optimizers
+
+**What we discussed:**
+- Adding three new optimizers: Muon (orthogonalised Nesterov), Adan (adaptive Nesterov momentum), and AdaHessian (second-order Hessian diagonal preconditioner)
+
+**What was built:**
+- `optimizers/muon.py` — Muon: Nesterov momentum with Gram-Schmidt orthogonalisation via `torch.linalg.svd`; 1-D params fall back to SGD; default lr=0.02
+- `optimizers/adan.py` — Adan: three EMA terms (gradient, gradient difference, squared gradient difference) for Nesterov look-ahead + element-wise preconditioning; default lr=1e-3
+- `optimizers/adahessian.py` — AdaHessian: Hutchinson Hessian diagonal estimator; `requires_create_graph = True` class attribute; default lr=0.1
+- `optimizers/__init__.py` — exports Muon, Adan, AdaHessian
+- `train.py` — OPTIMIZER_REGISTRY extended to 14 entries; `train_one_epoch()` detects `requires_create_graph` and switches to `autograd.grad(create_graph=True)` path
+- `benchmark.py` — OPTIMIZER_REGISTRY extended to 13 entries (Muon magenta, Adan olive, AdaHessian gold)
+- `tests/test_optimizers.py` — 19 new tests; total 37 (up from 18)
+
+**Issues encountered and fixed:**
+- AdaHessian needs `create_graph=True` during backward, which standard `.backward()` doesn't support cleanly. Fixed via `requires_create_graph` flag checked in `train_one_epoch()`.
+
+---
+
+## Session 17 — Schedulers, Early Stopping, Gradient Clipping, Checkpoints, and Log-Replay Plotting
+
+**What we discussed:**
+- Adding LR scheduling options (cosine, step, warmup+cosine)
+- Adding early stopping to prevent overfitting
+- Adding gradient norm clipping for training stability
+- Adding `--weight-decay`, `--seed`, `--checkpoint-dir` flags
+- Saving `best.pt` and `final.pt` checkpoints during training
+- Plotting training curves directly from saved log files
+
+**What was built:**
+- `train.py`:
+  - `SCHEDULER_REGISTRY` — `none`, `cosine`, `step`, `warmup_cosine`
+  - `EarlyStopping` class — patience-based; saves and restores best-epoch weights
+  - `train_one_epoch()` — `max_grad_norm` kwarg; returns `grad_norm_before_clip`
+  - `run_training()` — `scheduler`, `patience`, `min_delta`, `max_grad_norm` args; history gains `learning_rates`, `early_stopped_epoch`, `grad_norm_before_clip`
+  - New CLI flags: `--scheduler`, `--warmup-epochs`, `--patience`, `--min-delta`, `--max-grad-norm`, `--weight-decay`, `--seed`, `--checkpoint-dir`
+  - `Visualizer.update()` — accepts `learning_rate` kwarg; LR trace overlaid on Loss vs Epoch panel
+- `benchmark.py` — matching new CLI flags; `run_benchmark()` accepts all new args; `plot_benchmark()` gains LR vs Epoch column
+- `tests/test_train.py` — added `TestSchedulers`, `TestEarlyStopping`, `TestGradientClipping`, `TestSeed`; total 68 tests
+- `tests/test_checkpoints.py` (new) — 5 tests for checkpoint save and restore
+- `tests/test_plot_from_logs.py` (new) — 9 tests for log-replay plotting
+
+Total tests: 227 (up from 190). CI green on `main`.
+
+---
+
+## Session 18 — LR Range Test
+
+**What we discussed:**
+- Adding a Learning Rate Range Test (Leslie Smith, 2018) to give users a principled starting LR for any optimizer/dataset pair
+- Keeping the implementation self-contained so it can be used independently of `train.py`
+
+**What was built:**
+- `lr_finder.py` (new) — `LRFinder` class:
+  - Ramps LR exponentially from `start_lr` to `end_lr` over `num_iter` mini-batch steps
+  - EMA-smoothed loss tracking; early exit on divergence (`diverge_th * best_loss`)
+  - Model and optimizer state unconditionally restored via `finally` block
+  - `requires_create_graph` path for AdaHessian compatibility
+  - `suggestion()` — LR at steepest negative loss gradient
+  - `plot(save_path)` — log-scale figure with suggested LR marked
+- `train.py` — `from lr_finder import LRFinder` import; `--find-lr`, `--find-lr-iters`, `--find-lr-plot` CLI flags; pre-training block runs the test and prints the suggestion
+- `tests/test_lr_finder.py` (new) — 7 tests: history keys, length, monotone LR, state restoration (weights + LR), suggestion range, AdaHessian compatibility
+
+Total tests: 234 (up from 227). CI green on `main`.
+
+---
+
+## Current State
+
+| Component | Status |
+|---|---|
+| Models | MLP, ResNet-18, ViT |
+| Datasets | MNIST, FashionMNIST, CIFAR-10, CIFAR-100, Tiny ImageNet + 5 synthetic |
+| Optimizers | 14 total (adam, adamw, nadam, radam, adagrad, sgd, rmsprop, vanilla_sgd, lion, lamb, shampoo, muon, adan, adahessian) |
+| Schedulers | none, cosine, step, warmup_cosine |
+| Early stopping | patience-based, restores best-epoch weights |
+| Gradient clipping | global norm clipping via `--max-grad-norm` |
+| LR range test | `lr_finder.py` + `--find-lr` in `train.py` |
+| Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
+| Tests | 234 passing |
+| CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |
