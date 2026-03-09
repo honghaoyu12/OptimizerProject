@@ -23,6 +23,7 @@ from torchvision import datasets, transforms
 from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from visualizer import Visualizer
+from lr_finder import LRFinder
 
 # ---------------------------------------------------------------------------
 # Optimizer registry
@@ -702,6 +703,12 @@ def parse_args():
                    help="Random seed for reproducibility (default: None, non-deterministic)")
     p.add_argument("--checkpoint-dir", default=None,
                    help="Directory to save best.pt and final.pt checkpoints (default: disabled)")
+    p.add_argument("--find-lr",       action="store_true",
+                   help="Run LR range test before training and print suggested LR")
+    p.add_argument("--find-lr-iters", default=100, type=int,
+                   help="Mini-batch steps for the LR range test (default: 100)")
+    p.add_argument("--find-lr-plot",  default=None,
+                   help="Save path for LR range test plot (default: no plot)")
     return p.parse_args()
 
 
@@ -750,6 +757,18 @@ def main():
     if args.checkpoint_dir:
         print(f"Checkpoints   : {args.checkpoint_dir}/")
     print()
+
+    if args.find_lr:
+        print("Running LR range test...")
+        finder = LRFinder(model, optimizer, criterion, device,
+                          num_iter=args.find_lr_iters)
+        finder.run(train_loader)
+        suggested_lr = finder.suggestion()
+        print(f"  Suggested LR : {suggested_lr:.2e}")
+        if args.find_lr_plot:
+            finder.plot(save_path=args.find_lr_plot)
+            print(f"  LR plot saved: {args.find_lr_plot}")
+        print()
 
     # Visualizer
     save_path = args.save_plot if args.save_plot else None
