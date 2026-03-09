@@ -15,6 +15,7 @@ from train import (
     evaluate,
     linear_layer_names,
     run_training,
+    set_seed,
     train_one_epoch,
     weight_norms,
 )
@@ -468,3 +469,48 @@ class TestWeightDecay:
         norm_no_wd = _run(0.0)
         norm_with_wd = _run(1.0)
         assert norm_with_wd < norm_no_wd
+
+
+# ---------------------------------------------------------------------------
+# Seed / reproducibility
+# ---------------------------------------------------------------------------
+
+class TestSeed:
+    def _run_one_epoch(self, seed=None):
+        """Set seed, build model+optimizer from scratch, return first epoch loss."""
+        if seed is not None:
+            set_seed(seed)
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[32, 16]).to(device)
+        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        loader = dummy_loader(n=64, in_channels=1, image_size=28, num_classes=10)
+        layer_names = linear_layer_names(model)
+        result = train_one_epoch(model, loader, optimizer, criterion, device, layer_names)
+        return result["loss"]
+
+    def test_same_seed_same_loss(self):
+        """Two runs with the same seed produce identical losses."""
+        loss_a = self._run_one_epoch(seed=42)
+        loss_b = self._run_one_epoch(seed=42)
+        assert loss_a == pytest.approx(loss_b)
+
+    def test_different_seeds_different_loss(self):
+        """Two runs with different seeds produce different losses."""
+        loss_a = self._run_one_epoch(seed=0)
+        loss_b = self._run_one_epoch(seed=99)
+        assert loss_a != pytest.approx(loss_b)
+
+    def test_no_seed_does_not_raise(self):
+        """Calling without a seed completes without error."""
+        loss = self._run_one_epoch(seed=None)
+        assert 0.0 < loss < 1e6
+
+    def test_set_seed_is_idempotent(self):
+        """set_seed with the same value twice gives the same RNG state."""
+        set_seed(7)
+        t1 = torch.randn(4)
+        set_seed(7)
+        t2 = torch.randn(4)
+        assert torch.allclose(t1, t2)
