@@ -410,3 +410,61 @@ class TestGradientClipping:
         )
         for before, after in zip(history["grad_norm_before_clip"], history["grad_norm_global"]):
             assert before == pytest.approx(after)
+
+
+# ---------------------------------------------------------------------------
+# Weight Decay
+# ---------------------------------------------------------------------------
+
+class TestWeightDecay:
+    def test_build_optimizer_accepts_weight_decay(self):
+        """All 11 optimizers in OPTIMIZER_REGISTRY build without error with wd=1e-4."""
+        from train import OPTIMIZER_REGISTRY
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        for name in OPTIMIZER_REGISTRY:
+            opt = build_optimizer(name, model.parameters(), lr=1e-3, weight_decay=1e-4)
+            assert opt is not None
+
+    def test_weight_decay_stored_in_param_groups(self):
+        """build_optimizer with weight_decay=1e-4 stores it in param_groups."""
+        opt = build_optimizer("adam", build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16]).parameters(),
+                              lr=1e-3, weight_decay=1e-4)
+        assert opt.param_groups[0]["weight_decay"] == pytest.approx(1e-4)
+
+    def test_weight_decay_zero_default(self):
+        """build_optimizer without weight_decay defaults to 0.0."""
+        opt = build_optimizer("adam", build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16]).parameters(),
+                              lr=1e-3)
+        assert opt.param_groups[0]["weight_decay"] == 0.0
+
+    def test_train_one_epoch_with_weight_decay(self):
+        """train_one_epoch with weight_decay=1e-3 completes and returns finite loss."""
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16]).to(device)
+        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3, weight_decay=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10)
+        layer_names = linear_layer_names(model)
+        result = train_one_epoch(model, loader, optimizer, criterion, device, layer_names)
+        assert 0.0 < result["loss"] < 1e6
+
+    def test_vanilla_sgd_weight_decay_shrinks_params(self):
+        """VanillaSGD with wd=1.0 produces smaller param norm than wd=0 after one step."""
+        from optimizers import VanillaSGD
+
+        def _run(wd):
+            torch.manual_seed(0)
+            model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+            optimizer = VanillaSGD(model.parameters(), lr=0.01, weight_decay=wd)
+            criterion = nn.CrossEntropyLoss()
+            loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10, batch_size=32)
+            images, labels = next(iter(loader))
+            optimizer.zero_grad()
+            criterion(model(images), labels).backward()
+            optimizer.step()
+            return sum(p.norm().item() for p in model.parameters())
+
+        norm_no_wd = _run(0.0)
+        norm_with_wd = _run(1.0)
+        assert norm_with_wd < norm_no_wd

@@ -36,20 +36,20 @@ from optimizers import VanillaSGD, Lion, LAMB, Shampoo
 
 OPTIMIZER_REGISTRY: dict = {
     # PyTorch built-ins
-    "adam":        lambda p, lr: torch.optim.Adam(p, lr=lr),
-    "adamw":       lambda p, lr: torch.optim.AdamW(p, lr=lr),
-    "nadam":       lambda p, lr: torch.optim.NAdam(p, lr=lr),
-    "radam":       lambda p, lr: torch.optim.RAdam(p, lr=lr),
-    "adagrad":     lambda p, lr: torch.optim.Adagrad(p, lr=lr),
-    "sgd":         lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9),
-    "rmsprop":     lambda p, lr: torch.optim.RMSprop(p, lr=lr),
+    "adam":        lambda p, lr, wd: torch.optim.Adam(p, lr=lr, weight_decay=wd),
+    "adamw":       lambda p, lr, wd: torch.optim.AdamW(p, lr=lr, weight_decay=wd),
+    "nadam":       lambda p, lr, wd: torch.optim.NAdam(p, lr=lr, weight_decay=wd),
+    "radam":       lambda p, lr, wd: torch.optim.RAdam(p, lr=lr, weight_decay=wd),
+    "adagrad":     lambda p, lr, wd: torch.optim.Adagrad(p, lr=lr, weight_decay=wd),
+    "sgd":         lambda p, lr, wd: torch.optim.SGD(p, lr=lr, momentum=0.9, weight_decay=wd),
+    "rmsprop":     lambda p, lr, wd: torch.optim.RMSprop(p, lr=lr, weight_decay=wd),
     # Custom implementations
-    "vanilla_sgd": lambda p, lr: VanillaSGD(p, lr=lr),
-    "lion":        lambda p, lr: Lion(p, lr=lr),
-    "lamb":        lambda p, lr: LAMB(p, lr=lr),
-    "shampoo":     lambda p, lr: Shampoo(p, lr=lr),
+    "vanilla_sgd": lambda p, lr, wd: VanillaSGD(p, lr=lr, weight_decay=wd),
+    "lion":        lambda p, lr, wd: Lion(p, lr=lr, weight_decay=wd),
+    "lamb":        lambda p, lr, wd: LAMB(p, lr=lr, weight_decay=wd),
+    "shampoo":     lambda p, lr, wd: Shampoo(p, lr=lr, weight_decay=wd),
     # --- ADD YOUR OPTIMIZER HERE ---
-    # "my_optimizer": lambda p, lr: MyOptimizer(p, lr=lr),
+    # "my_optimizer": lambda p, lr, wd: MyOptimizer(p, lr=lr, weight_decay=wd),
 }
 
 # ---------------------------------------------------------------------------
@@ -110,14 +110,14 @@ class EarlyStopping:
             model.load_state_dict({k: v.to(device) for k, v in self.best_state.items()})
 
 
-def build_optimizer(name: str, params, lr: float):
+def build_optimizer(name: str, params, lr: float, weight_decay: float = 0.0):
     name = name.lower()
     if name not in OPTIMIZER_REGISTRY:
         raise ValueError(
             f"Unknown optimizer '{name}'. "
             f"Available: {list(OPTIMIZER_REGISTRY.keys())}"
         )
-    return OPTIMIZER_REGISTRY[name](params, lr)
+    return OPTIMIZER_REGISTRY[name](params, lr, weight_decay)
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +615,8 @@ def parse_args():
                    help="Min val-loss improvement to reset patience counter")
     p.add_argument("--max-grad-norm", default=None, type=float,
                    help="Clip global gradient norm to this value (None = disabled)")
+    p.add_argument("--weight-decay", default=0.0, type=float,
+                   help="L2 weight decay coefficient (default: 0.0, disabled)")
     return p.parse_args()
 
 
@@ -644,7 +646,7 @@ def main():
 
     # Components
     train_loader, test_loader = get_dataloaders(args.dataset, args.batch_size, args.data_dir)
-    optimizer = build_optimizer(args.optimizer, model.parameters(), args.lr)
+    optimizer = build_optimizer(args.optimizer, model.parameters(), args.lr, args.weight_decay)
     criterion = nn.CrossEntropyLoss()
     scheduler = SCHEDULER_REGISTRY[args.scheduler](optimizer, args.epochs, args.warmup_epochs)
     print(f"Optimizer    : {optimizer.__class__.__name__}  (lr={args.lr})")
@@ -653,6 +655,8 @@ def main():
         print(f"Early stopping: patience={args.patience}, min_delta={args.min_delta}")
     if args.max_grad_norm is not None:
         print(f"Grad clipping : max_norm={args.max_grad_norm}")
+    if args.weight_decay > 0.0:
+        print(f"Weight decay  : {args.weight_decay:g}")
     print()
 
     # Visualizer
@@ -751,6 +755,7 @@ def main():
         "patience":      args.patience,
         "min_delta":     args.min_delta,
         "max_grad_norm": args.max_grad_norm,
+        "weight_decay":  args.weight_decay,
     }
     logger = TrainingLogger(log_dir=args.log_dir)
     logger.log_run(config, history)

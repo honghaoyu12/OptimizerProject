@@ -72,58 +72,58 @@ MODEL_REGISTRY: OrderedDict = OrderedDict([
 # Each entry: factory function + sensible default LR + display colour
 OPTIMIZER_REGISTRY: OrderedDict = OrderedDict([
     ("SGD",          {
-        "factory":    lambda p, lr: torch.optim.SGD(p, lr=lr),
+        "factory":    lambda p, lr, wd: torch.optim.SGD(p, lr=lr, weight_decay=wd),
         "default_lr": 0.01,
         "color":      "#e41a1c",   # red
     }),
     ("SGD+Momentum", {
-        "factory":    lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9),
+        "factory":    lambda p, lr, wd: torch.optim.SGD(p, lr=lr, momentum=0.9, weight_decay=wd),
         "default_lr": 0.01,
         "color":      "#ff7f00",   # orange
     }),
     ("Adam",         {
-        "factory":    lambda p, lr: torch.optim.Adam(p, lr=lr),
+        "factory":    lambda p, lr, wd: torch.optim.Adam(p, lr=lr, weight_decay=wd),
         "default_lr": 0.001,
         "color":      "#377eb8",   # blue
     }),
     ("Adagrad",      {
-        "factory":    lambda p, lr: torch.optim.Adagrad(p, lr=lr),
+        "factory":    lambda p, lr, wd: torch.optim.Adagrad(p, lr=lr, weight_decay=wd),
         "default_lr": 0.01,
         "color":      "#4daf4a",   # green
     }),
     ("AdamW",        {
-        "factory":    lambda p, lr: torch.optim.AdamW(p, lr=lr),
+        "factory":    lambda p, lr, wd: torch.optim.AdamW(p, lr=lr, weight_decay=wd),
         "default_lr": 0.001,
         "color":      "#984ea3",   # purple
     }),
     ("NAdam",        {
-        "factory":    lambda p, lr: torch.optim.NAdam(p, lr=lr),
+        "factory":    lambda p, lr, wd: torch.optim.NAdam(p, lr=lr, weight_decay=wd),
         "default_lr": 0.002,
         "color":      "#a65628",   # brown
     }),
     ("RAdam",        {
-        "factory":    lambda p, lr: torch.optim.RAdam(p, lr=lr),
+        "factory":    lambda p, lr, wd: torch.optim.RAdam(p, lr=lr, weight_decay=wd),
         "default_lr": 0.001,
         "color":      "#f781bf",   # pink
     }),
     ("Lion",         {
-        "factory":    lambda p, lr: Lion(p, lr=lr),
+        "factory":    lambda p, lr, wd: Lion(p, lr=lr, weight_decay=wd),
         "default_lr": 0.0001,
         "color":      "#17becf",   # teal
     }),
     ("LAMB",         {
-        "factory":    lambda p, lr: LAMB(p, lr=lr),
+        "factory":    lambda p, lr, wd: LAMB(p, lr=lr, weight_decay=wd),
         "default_lr": 0.001,
         "color":      "#8c564b",   # dark red
     }),
     ("Shampoo",      {
-        "factory":    lambda p, lr: Shampoo(p, lr=lr),
+        "factory":    lambda p, lr, wd: Shampoo(p, lr=lr, weight_decay=wd),
         "default_lr": 0.01,
         "color":      "#bcbd22",   # yellow-green
     }),
     # --- ADD YOUR CUSTOM OPTIMIZER HERE ---
     # ("MyOptimizer", {
-    #     "factory":    lambda p, lr: MyOptimizer(p, lr=lr),
+    #     "factory":    lambda p, lr, wd: MyOptimizer(p, lr=lr, weight_decay=wd),
     #     "default_lr": 0.001,
     #     "color":      "#e377c2",
     # }),
@@ -198,16 +198,21 @@ def run_benchmark(
     patience: int = 0,
     min_delta: float = 0.0,
     max_grad_norm: float | None = None,
+    weight_decays: list[float] | None = None,
 ) -> dict:
-    """Train every (dataset, model, optimizer) triple and collect histories.
+    """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
     Returns
     -------
-    dict mapping (dataset_name, model_name, optimizer_name) -> history_dict
+    dict mapping (dataset_name, model_name, series_name) -> history_dict
     """
+    if weight_decays is None:
+        weight_decays = [0.0]
+
     results: dict = {}
     criterion = nn.CrossEntropyLoss()
-    total_runs = len(dataset_names) * len(model_names) * len(optimizer_names)
+    sweep_wd = len(weight_decays) > 1
+    total_runs = len(dataset_names) * len(model_names) * len(optimizer_names) * len(weight_decays)
     run_idx = 0
 
     for ds_name in dataset_names:
@@ -219,49 +224,53 @@ def run_benchmark(
         for mdl_name in model_names:
             if ds_info.get("tabular") and mdl_name != "MLP":
                 print(f"\n  Skipping {mdl_name} for tabular dataset '{ds_name}' (MLP only).")
-                run_idx += len(optimizer_names)
+                run_idx += len(optimizer_names) * len(weight_decays)
                 continue
             mdl_info = MODEL_REGISTRY[mdl_name]
 
             for opt_name in optimizer_names:
-                run_idx += 1
                 opt_info = OPTIMIZER_REGISTRY[opt_name]
                 lr = lr_override if lr_override is not None else opt_info["default_lr"]
 
-                print(f"\n{'═' * 60}")
-                print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {opt_name}  (lr={lr})")
-                print(f"{'═' * 60}")
+                for wd in weight_decays:
+                    run_idx += 1
+                    series_name = f"{opt_name} (wd={wd:g})" if sweep_wd else opt_name
 
-                model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
-                optimizer = opt_info["factory"](model.parameters(), lr)
-                layer_names = linear_layer_names(model)
-                scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
+                    print(f"\n{'═' * 60}")
+                    print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {series_name}  (lr={lr})")
+                    print(f"{'═' * 60}")
 
-                history = run_training(
-                    model, train_loader, test_loader,
-                    optimizer, criterion, device,
-                    epochs, layer_names, verbose=True,
-                    scheduler=scheduler,
-                    patience=patience,
-                    min_delta=min_delta,
-                    max_grad_norm=max_grad_norm,
-                )
-                results[(ds_name, mdl_name, opt_name)] = history
+                    model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
+                    optimizer = opt_info["factory"](model.parameters(), lr, wd)
+                    layer_names = linear_layer_names(model)
+                    scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
 
-                if logger is not None:
-                    config = {
-                        "dataset":       ds_key,
-                        "model":         mdl_name,
-                        "optimizer":     opt_name,
-                        "lr":            lr,
-                        "epochs":        epochs,
-                        "batch_size":    batch_size,
-                        "scheduler":     scheduler_name,
-                        "patience":      patience,
-                        "min_delta":     min_delta,
-                        "max_grad_norm": max_grad_norm,
-                    }
-                    logger.log_run(config, history)
+                    history = run_training(
+                        model, train_loader, test_loader,
+                        optimizer, criterion, device,
+                        epochs, layer_names, verbose=True,
+                        scheduler=scheduler,
+                        patience=patience,
+                        min_delta=min_delta,
+                        max_grad_norm=max_grad_norm,
+                    )
+                    results[(ds_name, mdl_name, series_name)] = history
+
+                    if logger is not None:
+                        config = {
+                            "dataset":       ds_key,
+                            "model":         mdl_name,
+                            "optimizer":     opt_name,
+                            "lr":            lr,
+                            "epochs":        epochs,
+                            "batch_size":    batch_size,
+                            "scheduler":     scheduler_name,
+                            "patience":      patience,
+                            "min_delta":     min_delta,
+                            "max_grad_norm": max_grad_norm,
+                            "weight_decay":  wd,
+                        }
+                        logger.log_run(config, history)
 
     return results
 
@@ -296,6 +305,8 @@ def parse_args():
                    help="Min val-loss improvement to reset patience counter")
     p.add_argument("--max-grad-norm", default=None, type=float,
                    help="Clip global gradient norm to this value (None = disabled)")
+    p.add_argument("--weight-decays", default=[0.0], type=float, nargs="+",
+                   help="Weight decay values to sweep (e.g. --weight-decays 0 1e-4 1e-3)")
     return p.parse_args()
 
 
@@ -320,6 +331,21 @@ def main():
     print(f"  Selected models     : {', '.join(model_names)}")
     print(f"  Selected optimizers : {', '.join(optimizer_names)}")
 
+    # ── Determine series names and colors ─────────────────────────────────
+    sweep_wd = len(args.weight_decays) > 1
+    if sweep_wd:
+        series_names = [
+            f"{opt} (wd={wd:g})"
+            for opt in optimizer_names
+            for wd in args.weight_decays
+        ]
+        import matplotlib.pyplot as plt
+        cmap = plt.get_cmap("tab20")
+        opt_colors = {n: cmap(i % 20 / 20) for i, n in enumerate(series_names)}
+    else:
+        series_names = optimizer_names
+        opt_colors = {n: OPTIMIZER_REGISTRY[n]["color"] for n in optimizer_names}
+
     # ── Run ───────────────────────────────────────────────────────────────
     logger = TrainingLogger(log_dir=args.log_dir)
     results = run_benchmark(
@@ -336,13 +362,13 @@ def main():
         patience=args.patience,
         min_delta=args.min_delta,
         max_grad_norm=args.max_grad_norm,
+        weight_decays=args.weight_decays,
     )
     logger.close()
 
     # ── Plot ──────────────────────────────────────────────────────────────
-    opt_colors = {name: OPTIMIZER_REGISTRY[name]["color"] for name in optimizer_names}
-    save_path  = args.save_plot if args.save_plot else None
-    plot_benchmark(results, dataset_names, model_names, optimizer_names, opt_colors, save_path=save_path)
+    save_path = args.save_plot if args.save_plot else None
+    plot_benchmark(results, dataset_names, model_names, series_names, opt_colors, save_path=save_path)
 
 
 if __name__ == "__main__":

@@ -16,8 +16,8 @@ class VanillaSGD(BaseOptimizer):
         Learning rate.
     """
 
-    def __init__(self, params, lr: float = 1e-2):
-        defaults = dict(lr=lr)
+    def __init__(self, params, lr: float = 1e-2, weight_decay: float = 0.0):
+        defaults = dict(lr=lr, weight_decay=weight_decay)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -29,9 +29,13 @@ class VanillaSGD(BaseOptimizer):
 
         for group in self.param_groups:
             lr = group["lr"]
+            wd = group["weight_decay"]
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                p.add_(p.grad, alpha=-lr)
+                grad = p.grad
+                if wd != 0.0:
+                    grad = grad.add(p.data, alpha=wd)
+                p.add_(grad, alpha=-lr)
 
         return loss
