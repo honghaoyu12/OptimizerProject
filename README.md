@@ -46,6 +46,7 @@ OptimizerProject/
 ├── data/                 # Datasets downloaded here automatically
 ├── CHANGELOG.md          # Technical history of all file changes
 ├── SESSION_LOG.md        # Narrative log of all project discussions and decisions
+├── LR_GUIDE.md           # Guide to LR finder and LR scheduler — what they do and how to use them together
 └── README.md
 ```
 
@@ -569,7 +570,7 @@ python train.py --optimizer my_optimizer --lr 0.001
 
 ### `lr_finder.py`
 
-`LRFinder` class — runs a learning-rate range test before training to suggest a good starting LR.
+`LRFinder` class — runs a learning-rate range test before training to suggest a good starting LR. For a full explanation of how the finder and scheduler differ and how to combine them, see [`LR_GUIDE.md`](LR_GUIDE.md).
 
 ```python
 finder = LRFinder(model, optimizer, criterion, device,
