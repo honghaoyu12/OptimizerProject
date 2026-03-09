@@ -195,6 +195,8 @@ def run_benchmark(
     logger: TrainingLogger | None = None,
     scheduler_name: str = "none",
     warmup_epochs: int = 5,
+    patience: int = 0,
+    min_delta: float = 0.0,
 ) -> dict:
     """Train every (dataset, model, optimizer) triple and collect histories.
 
@@ -239,6 +241,8 @@ def run_benchmark(
                     optimizer, criterion, device,
                     epochs, layer_names, verbose=True,
                     scheduler=scheduler,
+                    patience=patience,
+                    min_delta=min_delta,
                 )
                 results[(ds_name, mdl_name, opt_name)] = history
 
@@ -251,6 +255,8 @@ def run_benchmark(
                         "epochs":     epochs,
                         "batch_size": batch_size,
                         "scheduler":  scheduler_name,
+                        "patience":   patience,
+                        "min_delta":  min_delta,
                     }
                     logger.log_run(config, history)
 
@@ -281,6 +287,10 @@ def parse_args():
                    help="LR scheduler: none | cosine | step | warmup_cosine")
     p.add_argument("--warmup-epochs", default=5, type=int,
                    help="Linear warmup epochs for warmup_cosine (default: 5)")
+    p.add_argument("--patience",  default=0,   type=int,
+                   help="Early stopping patience epochs (0 = disabled)")
+    p.add_argument("--min-delta", default=0.0, type=float,
+                   help="Min val-loss improvement to reset patience counter")
     return p.parse_args()
 
 
@@ -318,6 +328,8 @@ def main():
         logger=logger,
         scheduler_name=args.scheduler,
         warmup_epochs=args.warmup_epochs,
+        patience=args.patience,
+        min_delta=args.min_delta,
     )
     logger.close()
 

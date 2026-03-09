@@ -79,6 +79,37 @@ SCHEDULER_REGISTRY: dict = {
 }
 
 
+class EarlyStopping:
+    """Monitors val loss; signals when to stop and saves the best model state."""
+    def __init__(self, patience: int = 0, min_delta: float = 0.0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float("inf")
+        self.counter = 0
+        self.best_state: dict | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.patience > 0
+
+    def step(self, val_loss: float, model: nn.Module) -> bool:
+        """Update state. Returns True if training should stop."""
+        if not self.enabled:
+            return False
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            self.best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            self.counter += 1
+        return self.counter >= self.patience
+
+    def restore(self, model: nn.Module, device: torch.device) -> None:
+        """Load best weights back into model (no-op if no checkpoint saved)."""
+        if self.best_state is not None:
+            model.load_state_dict({k: v.to(device) for k, v in self.best_state.items()})
+
+
 def build_optimizer(name: str, params, lr: float):
     name = name.lower()
     if name not in OPTIMIZER_REGISTRY:
@@ -409,6 +440,8 @@ def run_training(
     compute_hessian: bool = False,
     target_acc: float = 0.95,
     scheduler=None,
+    patience: int = 0,
+    min_delta: float = 0.0,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -445,7 +478,10 @@ def run_training(
         "sharpness": [],
         "step_losses": [],
         "learning_rates": [],
+        "early_stopped_epoch": None,
     }
+
+    es = EarlyStopping(patience, min_delta)
 
     # Fixed batch for Hessian/sharpness (reuse same batch each epoch)
     hessian_batch = None
@@ -511,6 +547,14 @@ def run_training(
                 f"test  loss {test_loss:.4f}  acc {test_acc*100:.2f}%"
             )
 
+        if es.step(test_loss, model):
+            history["early_stopped_epoch"] = epoch
+            es.restore(model, device)
+            if verbose:
+                print(f"  Early stopping at epoch {epoch} "
+                      f"(best val loss {es.best_loss:.4f})")
+            break
+
     return history
 
 
@@ -544,6 +588,10 @@ def parse_args():
                    help="LR scheduler: none | cosine | step | warmup_cosine")
     p.add_argument("--warmup-epochs", default=5, type=int,
                    help="Linear warmup epochs for warmup_cosine (default: 5)")
+    p.add_argument("--patience",  default=0,   type=int,
+                   help="Early stopping patience epochs (0 = disabled)")
+    p.add_argument("--min-delta", default=0.0, type=float,
+                   help="Min val-loss improvement to reset patience counter")
     return p.parse_args()
 
 
@@ -578,6 +626,8 @@ def main():
     scheduler = SCHEDULER_REGISTRY[args.scheduler](optimizer, args.epochs, args.warmup_epochs)
     print(f"Optimizer    : {optimizer.__class__.__name__}  (lr={args.lr})")
     print(f"Scheduler    : {args.scheduler}")
+    if args.patience > 0:
+        print(f"Early stopping: patience={args.patience}, min_delta={args.min_delta}")
     print()
 
     # Visualizer
@@ -601,7 +651,9 @@ def main():
         "test_loss":  [], "test_acc":  [],
         "time_elapsed": [], "step_losses": [],
         "learning_rates": [],
+        "early_stopped_epoch": None,
     }
+    es = EarlyStopping(args.patience, args.min_delta)
     run_start = time.time()
 
     for epoch in range(1, args.epochs + 1):
@@ -650,6 +702,13 @@ def main():
         if scheduler is not None:
             scheduler.step()
 
+        if es.step(test_loss, model):
+            history["early_stopped_epoch"] = epoch
+            es.restore(model, device)
+            print(f"Early stopping at epoch {epoch} "
+                  f"(best val loss {es.best_loss:.4f})")
+            break
+
     if vis is not None:
         vis.close()
 
@@ -663,6 +722,8 @@ def main():
         "batch_size":   args.batch_size,
         "hidden_sizes": args.hidden_sizes,
         "scheduler":    args.scheduler,
+        "patience":     args.patience,
+        "min_delta":    args.min_delta,
     }
     logger = TrainingLogger(log_dir=args.log_dir)
     logger.log_run(config, history)

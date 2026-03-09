@@ -9,6 +9,7 @@ from train import (
     DATASET_INFO,
     OPTIMIZER_REGISTRY,
     SCHEDULER_REGISTRY,
+    EarlyStopping,
     build_model,
     build_optimizer,
     evaluate,
@@ -266,3 +267,92 @@ class TestSchedulers:
         lrs = history["learning_rates"]
         assert len(lrs) == 3
         assert all(lr == lrs[0] for lr in lrs), "LR should be constant with no scheduler"
+
+
+# ---------------------------------------------------------------------------
+# EarlyStopping
+# ---------------------------------------------------------------------------
+
+class TestEarlyStopping:
+    def test_disabled_when_patience_zero(self):
+        es = EarlyStopping(patience=0)
+        assert not es.enabled
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        for loss in [1.0, 2.0, 3.0]:
+            assert es.step(loss, model) is False
+
+    def test_triggers_after_patience_epochs(self):
+        es = EarlyStopping(patience=3)
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        # First step improves → saves best, counter stays 0
+        assert es.step(1.0, model) is False
+        # Three non-improving steps → should trigger on the 3rd
+        assert es.step(1.5, model) is False
+        assert es.step(1.5, model) is False
+        assert es.step(1.5, model) is True
+
+    def test_no_trigger_when_improving(self):
+        es = EarlyStopping(patience=2)
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        for loss in [1.0, 0.9, 0.8, 0.7, 0.6]:
+            assert es.step(loss, model) is False
+
+    def test_best_state_saved_on_improvement(self):
+        es = EarlyStopping(patience=2)
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        assert es.best_state is None
+        es.step(1.0, model)
+        assert es.best_state is not None
+        assert es.best_loss == 1.0
+
+    def test_restore_loads_best_weights(self):
+        device = torch.device("cpu")
+        es = EarlyStopping(patience=2)
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16]).to(device)
+        # Save weights at best epoch
+        es.step(1.0, model)
+        best_param = next(iter(es.best_state.values())).clone()
+        # Mutate model weights
+        with torch.no_grad():
+            for p in model.parameters():
+                p.fill_(999.0)
+        # Restore and verify weights match the saved best
+        es.restore(model, device)
+        restored_param = next(iter(model.state_dict().values()))
+        assert torch.allclose(restored_param, best_param)
+
+    def test_run_training_stops_early(self):
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16]).to(device)
+        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10, batch_size=32)
+        layer_names = linear_layer_names(model)
+
+        # min_delta=1e9 means no realistic improvement satisfies the threshold,
+        # so the counter increments every epoch and patience=2 fires after 3 epochs.
+        history = run_training(
+            model, loader, loader, optimizer, criterion,
+            device, epochs=50, layer_names=layer_names,
+            verbose=False, patience=2, min_delta=1e9,
+        )
+        assert history["early_stopped_epoch"] is not None
+        assert len(history["train_loss"]) < 50
+
+    def test_run_training_no_early_stop(self):
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16]).to(device)
+        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10, batch_size=32)
+        layer_names = linear_layer_names(model)
+
+        history = run_training(
+            model, loader, loader, optimizer, criterion,
+            device, epochs=3, layer_names=layer_names,
+            verbose=False, patience=0,
+        )
+        assert history["early_stopped_epoch"] is None
+        assert len(history["train_loss"]) == 3
