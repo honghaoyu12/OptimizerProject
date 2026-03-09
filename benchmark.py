@@ -20,7 +20,7 @@ import torch.nn as nn
 
 from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
-from optimizers import Lion, LAMB, Shampoo
+from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian
 from train import DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders, linear_layer_names, run_training, set_seed
 from visualizer import plot_benchmark
 
@@ -120,6 +120,21 @@ OPTIMIZER_REGISTRY: OrderedDict = OrderedDict([
         "factory":    lambda p, lr, wd: Shampoo(p, lr=lr, weight_decay=wd),
         "default_lr": 0.01,
         "color":      "#bcbd22",   # yellow-green
+    }),
+    ("Muon",         {
+        "factory":    lambda p, lr, wd: Muon(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.02,
+        "color":      "#e7298a",   # magenta
+    }),
+    ("Adan",         {
+        "factory":    lambda p, lr, wd: Adan(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.001,
+        "color":      "#66a61e",   # olive
+    }),
+    ("AdaHessian",   {
+        "factory":    lambda p, lr, wd: AdaHessian(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.1,
+        "color":      "#e6ab02",   # gold
     }),
     # --- ADD YOUR CUSTOM OPTIMIZER HERE ---
     # ("MyOptimizer", {
