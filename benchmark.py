@@ -18,9 +18,10 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 
+from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo
-from train import DATASET_INFO, get_dataloaders, linear_layer_names, run_training
+from train import DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders, linear_layer_names, run_training
 from visualizer import plot_benchmark
 
 
@@ -29,10 +30,17 @@ from visualizer import plot_benchmark
 # ---------------------------------------------------------------------------
 
 DATASET_REGISTRY: OrderedDict = OrderedDict([
-    ("MNIST",          "mnist"),
-    ("Fashion MNIST",  "fashion_mnist"),
-    ("CIFAR-10",       "cifar10"),
-    ("Tiny ImageNet",  "tiny_imagenet"),
+    ("MNIST",                     "mnist"),
+    ("Fashion MNIST",             "fashion_mnist"),
+    ("CIFAR-10",                  "cifar10"),
+    ("CIFAR-100",                 "cifar100"),
+    ("Tiny ImageNet",             "tiny_imagenet"),
+    # Synthetic datasets (MLP only)
+    ("Ill-Conditioned (synth)",   "illcond"),
+    ("Sparse Signal (synth)",     "sparse"),
+    ("Noisy Gradient (synth)",    "noisy_grad"),
+    ("Nonlinear Manifold (synth)","manifold"),
+    ("Saddle Point (synth)",      "saddle"),
 ])
 
 MODEL_REGISTRY: OrderedDict = OrderedDict([
@@ -184,6 +192,9 @@ def run_benchmark(
     data_dir: str,
     device: torch.device,
     lr_override: float | None,
+    logger: TrainingLogger | None = None,
+    scheduler_name: str = "none",
+    warmup_epochs: int = 5,
 ) -> dict:
     """Train every (dataset, model, optimizer) triple and collect histories.
 
@@ -203,6 +214,10 @@ def run_benchmark(
         train_loader, test_loader = get_dataloaders(ds_key, batch_size, data_dir)
 
         for mdl_name in model_names:
+            if ds_info.get("tabular") and mdl_name != "MLP":
+                print(f"\n  Skipping {mdl_name} for tabular dataset '{ds_name}' (MLP only).")
+                run_idx += len(optimizer_names)
+                continue
             mdl_info = MODEL_REGISTRY[mdl_name]
 
             for opt_name in optimizer_names:
@@ -217,13 +232,27 @@ def run_benchmark(
                 model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
                 optimizer = opt_info["factory"](model.parameters(), lr)
                 layer_names = linear_layer_names(model)
+                scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
 
                 history = run_training(
                     model, train_loader, test_loader,
                     optimizer, criterion, device,
                     epochs, layer_names, verbose=True,
+                    scheduler=scheduler,
                 )
                 results[(ds_name, mdl_name, opt_name)] = history
+
+                if logger is not None:
+                    config = {
+                        "dataset":    ds_key,
+                        "model":      mdl_name,
+                        "optimizer":  opt_name,
+                        "lr":         lr,
+                        "epochs":     epochs,
+                        "batch_size": batch_size,
+                        "scheduler":  scheduler_name,
+                    }
+                    logger.log_run(config, history)
 
     return results
 
@@ -243,8 +272,15 @@ def parse_args():
                    help="Override all optimizer default LRs (omit to use per-optimizer defaults)")
     p.add_argument("--data-dir",     default="./data")
     p.add_argument("--device",       default="auto",     help="cpu | cuda | mps | auto")
-    p.add_argument("--save-plot",    default="benchmark.png",
+    p.add_argument("--save-plot",    default="plots/benchmark.png",
                    help="Path to save comparison figure ('' to disable)")
+    p.add_argument("--log-dir",      default="logs",
+                   help="Root directory for training logs (default: logs/)")
+    p.add_argument("--scheduler",    default="none",
+                   choices=list(SCHEDULER_REGISTRY.keys()),
+                   help="LR scheduler: none | cosine | step | warmup_cosine")
+    p.add_argument("--warmup-epochs", default=5, type=int,
+                   help="Linear warmup epochs for warmup_cosine (default: 5)")
     return p.parse_args()
 
 
@@ -270,6 +306,7 @@ def main():
     print(f"  Selected optimizers : {', '.join(optimizer_names)}")
 
     # ── Run ───────────────────────────────────────────────────────────────
+    logger = TrainingLogger(log_dir=args.log_dir)
     results = run_benchmark(
         dataset_names, model_names, optimizer_names,
         hidden_sizes=args.hidden_sizes,
@@ -278,7 +315,11 @@ def main():
         data_dir=args.data_dir,
         device=device,
         lr_override=args.lr,
+        logger=logger,
+        scheduler_name=args.scheduler,
+        warmup_epochs=args.warmup_epochs,
     )
+    logger.close()
 
     # ── Plot ──────────────────────────────────────────────────────────────
     opt_colors = {name: OPTIMIZER_REGISTRY[name]["color"] for name in optimizer_names}

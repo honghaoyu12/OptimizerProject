@@ -19,6 +19,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
+from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from visualizer import Visualizer
 
@@ -51,6 +52,32 @@ OPTIMIZER_REGISTRY: dict = {
     # "my_optimizer": lambda p, lr: MyOptimizer(p, lr=lr),
 }
 
+# ---------------------------------------------------------------------------
+# Scheduler registry
+# ---------------------------------------------------------------------------
+
+SCHEDULER_REGISTRY: dict = {
+    "none": lambda opt, epochs, warmup: None,
+    "cosine": lambda opt, epochs, warmup: torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=epochs, eta_min=0.0
+    ),
+    "step": lambda opt, epochs, warmup: torch.optim.lr_scheduler.StepLR(
+        opt, step_size=max(1, epochs // 3), gamma=0.1
+    ),
+    "warmup_cosine": lambda opt, epochs, warmup: torch.optim.lr_scheduler.SequentialLR(
+        opt,
+        schedulers=[
+            torch.optim.lr_scheduler.LinearLR(
+                opt, start_factor=1e-3, end_factor=1.0, total_iters=max(1, warmup)
+            ),
+            torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt, T_max=max(1, epochs - warmup), eta_min=0.0
+            ),
+        ],
+        milestones=[max(1, warmup)],
+    ),
+}
+
 
 def build_optimizer(name: str, params, lr: float):
     name = name.lower()
@@ -67,10 +94,18 @@ def build_optimizer(name: str, params, lr: float):
 # ---------------------------------------------------------------------------
 
 DATASET_INFO: dict = {
+    # Image datasets
     "mnist":          {"in_channels": 1, "input_size": 784,   "num_classes": 10},
     "fashion_mnist":  {"in_channels": 1, "input_size": 784,   "num_classes": 10},
     "cifar10":        {"in_channels": 3, "input_size": 3072,  "num_classes": 10},
+    "cifar100":       {"in_channels": 3, "input_size": 3072,  "num_classes": 100},
     "tiny_imagenet":  {"in_channels": 3, "input_size": 12288, "num_classes": 200},
+    # Synthetic tabular datasets (MLP only)
+    "illcond":        {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "sparse":         {"in_channels": 1, "input_size": 100,   "num_classes": 2,  "tabular": True},
+    "noisy_grad":     {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "manifold":       {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "saddle":         {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
 }
 
 # ---------------------------------------------------------------------------
@@ -81,6 +116,7 @@ _DATASET_STATS = {
     "mnist":         ((0.1307,), (0.3081,)),
     "fashion_mnist": ((0.2860,), (0.3530,)),
     "cifar10":       ((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+    "cifar100":      ((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     "tiny_imagenet": ((0.4802, 0.4481, 0.3975), (0.2770, 0.2691, 0.2821)),
 }
 
@@ -160,9 +196,14 @@ def get_dataloaders(dataset: str = "mnist", batch_size: int = 128, data_dir: str
     if dataset not in DATASET_INFO:
         raise ValueError(f"Unknown dataset '{dataset}'. Choose from {list(DATASET_INFO)}")
 
+    # Synthetic tabular datasets are self-normalising — delegate immediately
+    if DATASET_INFO[dataset].get("tabular"):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        return SYNTHETIC_LOADERS[dataset](batch_size=batch_size)
+
     mean, std = _DATASET_STATS[dataset]
 
-    if dataset == "cifar10":
+    if dataset in ("cifar10", "cifar100"):
         train_transform = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -173,8 +214,9 @@ def get_dataloaders(dataset: str = "mnist", batch_size: int = 128, data_dir: str
             transforms.ToTensor(),
             transforms.Normalize(mean, std),
         ])
-        train_set = datasets.CIFAR10(data_dir, train=True,  download=True, transform=train_transform)
-        test_set  = datasets.CIFAR10(data_dir, train=False, download=True, transform=test_transform)
+        cls = datasets.CIFAR10 if dataset == "cifar10" else datasets.CIFAR100
+        train_set = cls(data_dir, train=True,  download=True, transform=train_transform)
+        test_set  = cls(data_dir, train=False, download=True, transform=test_transform)
     elif dataset == "tiny_imagenet":
         root = _setup_tiny_imagenet(data_dir)
         train_transform = transforms.Compose([
@@ -217,6 +259,10 @@ def build_model(model_name: str, dataset_info: dict, hidden_sizes: list[int]) ->
     hidden_sizes : hidden layer widths (only used by MLP)
     """
     name = model_name.lower()
+    if dataset_info.get("tabular") and name != "mlp":
+        raise ValueError(
+            f"Model '{model_name}' is not supported for tabular datasets. Use MLP."
+        )
     if name == "mlp":
         return MLP(
             input_size=dataset_info["input_size"],
@@ -362,6 +408,7 @@ def run_training(
     device, epochs, layer_names, verbose=True,
     compute_hessian: bool = False,
     target_acc: float = 0.95,
+    scheduler=None,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -380,6 +427,7 @@ def run_training(
         hessian_trace              : list[float]  — NaN if compute_hessian=False
         sharpness                  : list[float]  — NaN if compute_hessian=False
         step_losses                : list[float]  — all batch-level losses across epochs
+        learning_rates             : list[float]  — LR at start of each epoch
     """
     from metrics import compute_hessian_trace, compute_sharpness
 
@@ -396,6 +444,7 @@ def run_training(
         "hessian_trace": [],
         "sharpness": [],
         "step_losses": [],
+        "learning_rates": [],
     }
 
     # Fixed batch for Hessian/sharpness (reuse same batch each epoch)
@@ -410,6 +459,9 @@ def run_training(
     global_step_offset = 0
 
     for epoch in range(1, epochs + 1):
+        # Record LR before this epoch's training
+        history["learning_rates"].append(optimizer.param_groups[0]["lr"])
+
         epoch_result = train_one_epoch(
             model, train_loader, optimizer, criterion, device, layer_names,
             global_step_offset=global_step_offset,
@@ -449,6 +501,9 @@ def run_training(
         history["hessian_trace"].append(ht)
         history["sharpness"].append(sh)
 
+        if scheduler is not None:
+            scheduler.step()
+
         if verbose:
             print(
                 f"  Epoch {epoch:>3}/{epochs} | "
@@ -465,7 +520,7 @@ def run_training(
 
 def parse_args():
     p = argparse.ArgumentParser(description="Single-run trainer (MNIST / FashionMNIST / CIFAR-10)")
-    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | tiny_imagenet")
+    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet | illcond | sparse | noisy_grad | manifold | saddle")
     p.add_argument("--model",        default="mlp",      help="mlp | resnet18 | vit")
     p.add_argument("--optimizer",    default="adam",     help="Optimizer name (see OPTIMIZER_REGISTRY)")
     p.add_argument("--lr",           default=1e-3,       type=float, help="Learning rate")
@@ -478,10 +533,17 @@ def parse_args():
     p.add_argument("--data-dir",     default="./data")
     p.add_argument("--device",       default="auto",     help="cpu | cuda | mps | auto")
     p.add_argument("--no-plot",      action="store_true", help="Disable live visualisation")
-    p.add_argument("--save-plot",    default="training_curves.png",
+    p.add_argument("--save-plot",    default="plots/training_curves.png",
                    help="Path to save the final training figure ('' to disable)")
+    p.add_argument("--log-dir",      default="logs",
+                   help="Root directory for training logs (default: logs/)")
     p.add_argument("--hessian",      action="store_true",
                    help="Compute Hessian trace and sharpness each epoch (slow)")
+    p.add_argument("--scheduler",    default="none",
+                   choices=list(SCHEDULER_REGISTRY.keys()),
+                   help="LR scheduler: none | cosine | step | warmup_cosine")
+    p.add_argument("--warmup-epochs", default=5, type=int,
+                   help="Linear warmup epochs for warmup_cosine (default: 5)")
     return p.parse_args()
 
 
@@ -513,7 +575,9 @@ def main():
     train_loader, test_loader = get_dataloaders(args.dataset, args.batch_size, args.data_dir)
     optimizer = build_optimizer(args.optimizer, model.parameters(), args.lr)
     criterion = nn.CrossEntropyLoss()
+    scheduler = SCHEDULER_REGISTRY[args.scheduler](optimizer, args.epochs, args.warmup_epochs)
     print(f"Optimizer    : {optimizer.__class__.__name__}  (lr={args.lr})")
+    print(f"Scheduler    : {args.scheduler}")
     print()
 
     # Visualizer
@@ -531,7 +595,19 @@ def main():
     from metrics import compute_hessian_trace, compute_sharpness
     criterion_diag = nn.CrossEntropyLoss()
 
+    # History collected for logging
+    history = {
+        "train_loss": [], "train_acc": [],
+        "test_loss":  [], "test_acc":  [],
+        "time_elapsed": [], "step_losses": [],
+        "learning_rates": [],
+    }
+    run_start = time.time()
+
     for epoch in range(1, args.epochs + 1):
+        current_lr = optimizer.param_groups[0]["lr"]
+        history["learning_rates"].append(current_lr)
+
         epoch_result = train_one_epoch(
             model, train_loader, optimizer, criterion, device, layer_names
         )
@@ -552,6 +628,13 @@ def main():
             f"test  loss {test_loss:.4f}  acc {test_acc*100:.2f}%"
         )
 
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
+        history["test_loss"].append(test_loss)
+        history["test_acc"].append(test_acc)
+        history["time_elapsed"].append(time.time() - run_start)
+        history["step_losses"].extend(epoch_result["step_losses"])
+
         if vis is not None:
             vis.update(
                 epoch, train_loss, test_loss, train_acc, test_acc,
@@ -561,10 +644,29 @@ def main():
                 step_losses=epoch_result["step_losses"],
                 hessian_trace=ht,
                 sharpness=sh,
+                learning_rate=current_lr,
             )
+
+        if scheduler is not None:
+            scheduler.step()
 
     if vis is not None:
         vis.close()
+
+    # Write logs
+    config = {
+        "dataset":      args.dataset,
+        "model":        args.model,
+        "optimizer":    args.optimizer,
+        "lr":           args.lr,
+        "epochs":       args.epochs,
+        "batch_size":   args.batch_size,
+        "hidden_sizes": args.hidden_sizes,
+        "scheduler":    args.scheduler,
+    }
+    logger = TrainingLogger(log_dir=args.log_dir)
+    logger.log_run(config, history)
+    logger.close()
 
 
 if __name__ == "__main__":

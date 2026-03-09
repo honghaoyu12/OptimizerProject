@@ -4,6 +4,118 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 11 — Training Logger and Plot Directory Enforcement
+
+### New file: `logger.py`
+
+`TrainingLogger` class for structured logging of training sessions.
+
+- `__init__(log_dir)` — creates a timestamped subdirectory `logs/<YYYY-MM-DD_HH-MM-SS>/` at session start.
+- `log_run(config, history)` — writes one `<dataset>_<model>_<optimizer>.log` per run containing:
+  - Header: run name, timestamp, all config key-value pairs.
+  - `[epoch-wise]` CSV section: `epoch, train_loss, train_acc, test_loss, test_acc, time_elapsed_s`.
+  - `[batch-wise]` CSV section: `step, loss` for every training batch across all epochs.
+- `close()` — writes `run_summary.log` with session start/end times, elapsed seconds, total run count, and a formatted results table (train loss, train acc%, test loss, test acc% per run).
+
+### `train.py`
+- Default `--save-plot` changed from `training_curves.png` → `plots/training_curves.png`.
+- New `--log-dir` flag (default: `logs/`).
+- `main()` now collects a `history` dict (train/test loss and acc per epoch, cumulative `time_elapsed`, all `step_losses`) during the epoch loop, then calls `TrainingLogger.log_run()` and `close()` after training.
+
+### `benchmark.py`
+- Default `--save-plot` changed from `benchmark.png` → `plots/benchmark.png`.
+- New `--log-dir` flag (default: `logs/`).
+- `run_benchmark()` accepts an optional `logger: TrainingLogger` argument; calls `log_run()` after each (dataset, model, optimizer) run.
+- `main()` creates a `TrainingLogger`, passes it to `run_benchmark()`, and calls `close()` after all runs.
+
+---
+
+## Round 10 — Bug Fix and Training Validation
+
+### `visualizer.py`
+- **Bug fix**: `Visualizer.close()` and `plot_benchmark()` both raised `FileNotFoundError` when `--save-plot` pointed to a subdirectory (e.g. `plots/foo.png`) that did not yet exist. Fixed by adding `os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)` before each `savefig` call.
+- Added `import os` to module imports.
+
+### Training validation
+Six end-to-end training runs confirmed clean after the fix:
+
+| Config | Final test acc |
+|---|---|
+| MNIST / MLP / Adam | 98.0% |
+| FashionMNIST / MLP / AdamW | 87.8% |
+| MNIST / ResNet-18 / SGD | 98.6% |
+| MNIST / MLP / Lion | 96.5% |
+| FashionMNIST / MLP / Shampoo | 87.8% |
+| illcond (synthetic) / MLP / Adam | 92.8% |
+
+Plots saved to `plots/`. All 140 tests continue to pass.
+
+---
+
+## Round 9 — Synthetic Datasets
+
+### New file: `synthetic_datasets.py`
+
+Five synthetic tabular datasets for probing specific optimizer weaknesses. All datasets produce binary classification tasks, standardise features on the training split, and return `(train_loader, test_loader)` pairs.
+
+| Key | Shape | What it tests |
+|---|---|---|
+| `illcond` | (2000, 64) | **Curvature handling** — Gaussian features with covariance condition number = 1 000 (log-spaced eigenvalues). Adaptive curvature methods (Adam, Shampoo) should outperform SGD. |
+| `sparse` | (2000, 100) | **Coordinate adaptivity** — only 5 out of 100 features are informative (via `sklearn.make_classification`). Per-coordinate optimizers (Adagrad, Adam) should adapt faster. |
+| `noisy_grad` | (2000, 64) | **Stochastic robustness** — 30% random label flips injected after data generation. Momentum-based optimizers (Adam, NAdam) should be more robust. |
+| `manifold` | (2000, 64) | **Nonconvex landscapes** — `sklearn.make_moons` (2-D nonlinear) embedded in 64-D with 62 noise dimensions. Tests optimizers on curved decision boundaries. |
+| `saddle` | (2000, 64) | **Escape from flat regions** — bimodal positive class (±2) vs. tight negative cluster at origin. Creates saddle-point structure. Momentum and second-order methods should escape faster. |
+
+Internal `_to_loaders()` helper: standardises with train-split mean/std, splits 80/20 train/test, returns `DataLoader` pairs.
+`SYNTHETIC_LOADERS` registry mirrors the `OPTIMIZER_REGISTRY` pattern for easy lookup.
+
+### `train.py`
+- `DATASET_INFO` extended with all 5 synthetic keys; each entry includes `"tabular": True`.
+- `get_dataloaders()`: synthetic datasets are delegated to `SYNTHETIC_LOADERS` before the `_DATASET_STATS` lookup.
+- `build_model()`: raises `ValueError` if a non-MLP model is requested for a tabular dataset.
+- `--dataset` CLI help updated.
+
+### `benchmark.py`
+- `DATASET_REGISTRY` extended with all 5 synthetic datasets (labelled with `(synth)` suffix).
+- `run_benchmark()`: ResNet-18 and ViT are skipped with a printed message when a tabular dataset is selected; run counter advances correctly.
+
+### `requirements.txt`
+- Added `scikit-learn>=1.3.0` (used by `make_classification` and `make_moons`).
+
+### `tests/test_synthetic.py` (new)
+- 45 tests across 7 classes:
+  - `TestRegistry` — all keys present, all values callable.
+  - `TestLoaderOutputs` (parametrized across all 5 datasets) — returns two `DataLoader`s; correct feature shape; labels in `{0, 1}`; no NaN/Inf; train > test size; features approximately standardised; reproducible with same seed; different seeds differ.
+  - `TestIllcond`, `TestSparse`, `TestNoisyGrad`, `TestManifold`, `TestSaddle` — dataset-specific property checks.
+
+### `tests/test_train.py`
+- `test_all_datasets_present`: expected key set updated to include all 5 synthetic keys.
+- `test_dataset_metadata`: 5 new parametrize cases added.
+- `test_mlp_all_datasets`: all 5 synthetic datasets added.
+- `test_tabular_rejects_non_mlp`: new parametrized test — `resnet18` and `vit` raise `ValueError` for tabular datasets.
+- Total tests: 140 (up from 76).
+
+---
+
+## Round 8 — CIFAR-100 Dataset
+
+### `train.py`
+- Added `"cifar100"` to `DATASET_INFO`: `{in_channels: 3, input_size: 3072, num_classes: 100}` (32×32 RGB, 100 classes).
+- Added CIFAR-100 normalization stats to `_DATASET_STATS`: mean=(0.5071, 0.4867, 0.4408), std=(0.2675, 0.2565, 0.2761).
+- `get_dataloaders()`: CIFAR-100 shares the CIFAR-10 augmentation pipeline (RandomCrop(32, padding=4) + RandomHorizontalFlip + Normalize) using `datasets.CIFAR100`.
+- `--dataset` CLI help updated to include `cifar100`.
+
+### `benchmark.py`
+- `DATASET_REGISTRY` extended with `("CIFAR-100", "cifar100")`.
+
+### `tests/test_train.py`
+- `test_all_datasets_present`: updated expected key set to include `"cifar100"`.
+- `test_dataset_metadata`: added `("cifar100", 3, 3072, 100)` parametrize case.
+- `test_mlp_all_datasets`, `test_resnet18_all_datasets`, `test_vit_all_datasets`: `"cifar100"` added to each.
+- Total tests: 76 (up from 72), all passing.
+
+---
+
 ## Round 7 — Test Suite and CI Pipeline
 
 ### New files: `tests/test_models.py`, `tests/test_optimizers.py`, `tests/test_metrics.py`, `tests/test_train.py`, `tests/__init__.py`

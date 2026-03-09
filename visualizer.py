@@ -13,6 +13,7 @@ Shows six panels that update after every epoch:
 """
 
 import math
+import os
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -61,6 +62,7 @@ class Visualizer:
         self.all_step_losses:   list[float] = []
         self.hessian_traces:    list[float] = []
         self.sharpnesses:       list[float] = []
+        self._lrs:              list[float] = []
 
         if live:
             plt.ion()
@@ -97,6 +99,7 @@ class Visualizer:
         step_losses: list[float] | None = None,
         hessian_trace: float = float("nan"),
         sharpness: float = float("nan"),
+        learning_rate: float = float("nan"),
     ) -> None:
         """Append one epoch of metrics and redraw the figure."""
         self.epochs.append(epoch)
@@ -108,6 +111,7 @@ class Visualizer:
         self.grad_norm_stds.append(grad_norm_std)
         self.hessian_traces.append(hessian_trace)
         self.sharpnesses.append(sharpness)
+        self._lrs.append(learning_rate)
         if step_losses:
             self.all_step_losses.extend(step_losses)
         for name in self.layer_names:
@@ -122,6 +126,7 @@ class Visualizer:
         """Render final figure, save to file, and close interactive mode."""
         self._redraw()
         if self.save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(self.save_path)), exist_ok=True)
             self.fig.savefig(self.save_path, dpi=150, bbox_inches="tight")
             print(f"\nFigure saved to {self.save_path}")
         if self.live:
@@ -169,6 +174,13 @@ class Visualizer:
         ax.plot(ep, self.train_losses, "o-", color="#2196F3", label="Train")
         ax.plot(ep, self.test_losses,  "s--", color="#F44336", label="Test")
         ax.legend(fontsize=8)
+        finite_lrs = [lr for lr in self._lrs if not math.isnan(lr)]
+        if finite_lrs:
+            ax2_lr = ax.twinx()
+            ax2_lr.plot(ep, self._lrs, "--", color="#9E9E9E", linewidth=1.2, label="LR")
+            ax2_lr.set_ylabel("Learning Rate", color="#9E9E9E", fontsize=8)
+            ax2_lr.tick_params(axis="y", labelcolor="#9E9E9E", labelsize=7)
+            ax2_lr.legend(loc="upper right", fontsize=7)
 
         # ---- Accuracy vs Epoch ----
         ax = self.ax_acc
@@ -277,15 +289,15 @@ def plot_benchmark(
     row_labels = [f"{ds} / {mdl}" for ds in dataset_names for mdl in model_names]
     n_rows = len(row_labels)
 
-    fig, axes = plt.subplots(n_rows, 4, figsize=(18, 4.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, 5, figsize=(22, 4.5 * n_rows))
     if n_rows == 1:
         axes = [axes]
 
     fig.suptitle("Optimizer Benchmark", fontsize=15, fontweight="bold")
 
-    col_titles = ["Train Loss", "Test Loss", "Train Accuracy (%)", "Test Accuracy (%)"]
-    col_keys   = ["train_loss", "test_loss", "train_acc", "test_acc"]
-    is_acc     = [False, False, True, True]
+    col_titles = ["Train Loss", "Test Loss", "Train Accuracy (%)", "Test Accuracy (%)", "LR vs Epoch"]
+    col_keys   = ["train_loss", "test_loss", "train_acc", "test_acc", "learning_rates"]
+    is_acc     = [False, False, True, True, False]
 
     for row, (ds_name, mdl_name) in enumerate(
         (ds, mdl) for ds in dataset_names for mdl in model_names
@@ -295,7 +307,10 @@ def plot_benchmark(
             ax = axes[row][col]
             ax.set_title(f"{row_label}\n{title}", fontsize=9)
             ax.set_xlabel("Epoch", fontsize=8)
-            ax.set_ylabel("Accuracy (%)" if acc else "Cross-entropy loss", fontsize=8)
+            if key == "learning_rates":
+                ax.set_ylabel("Learning Rate", fontsize=8)
+            else:
+                ax.set_ylabel("Accuracy (%)" if acc else "Cross-entropy loss", fontsize=8)
             if acc:
                 ax.set_ylim(0, 101)
 
@@ -304,7 +319,9 @@ def plot_benchmark(
                 if key3 not in results:
                     continue
                 history = results[key3]
-                values  = history[key]
+                values  = history.get(key, [])
+                if not values:
+                    continue
                 if acc:
                     values = [v * 100 for v in values]
                 epochs = list(range(1, len(values) + 1))
@@ -319,6 +336,7 @@ def plot_benchmark(
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"\nBenchmark figure saved to {save_path}")
 

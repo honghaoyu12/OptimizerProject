@@ -162,3 +162,136 @@ A chronological record of everything discussed and built across all conversation
 | Tests | 72 passing |
 | CI | GitHub Actions, green |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
+
+---
+
+## Session 10 — Housekeeping and Branch Setup
+
+**What we discussed:**
+- How to safely upgrade the project in the future without breaking working code
+- Whether git automatically handles version history (yes — every commit is a permanent snapshot)
+- Whether a local backup is needed (no — GitHub serves as off-site backup; tags useful for named restore points)
+- How memory files work: `MEMORY.md` is loaded into context at the start of every new conversation so Claude doesn't start from scratch
+
+**What was done:**
+- Updated `MEMORY.md` to reflect the full current project state (all models, datasets, optimizers, test files, CI, known issues, git remote)
+- Added `SESSION_LOG.md` to the project and committed it to GitHub
+- Added session log summary table and `SESSION_LOG.md` reference to `README.md`
+- Created and pushed `new_feature` branch — all future work happens here until ready to merge into `main`
+
+---
+
+---
+
+## Session 11 — CIFAR-100 Dataset
+
+**What we discussed:**
+- Adding CIFAR-100 as a fifth dataset (same image size as CIFAR-10 but 100 classes)
+
+**What was done:**
+- `train.py` — added `"cifar100"` to `DATASET_INFO` (32×32 RGB, 100 classes, input_size=3072); added normalization stats; `get_dataloaders()` handles CIFAR-100 via `datasets.CIFAR100` sharing the CIFAR-10 augmentation pipeline; CLI help updated
+- `benchmark.py` — `CIFAR-100` added to `DATASET_REGISTRY`
+- `tests/test_train.py` — `"cifar100"` added to all relevant parametrized tests; test count now 76 (up from 72)
+- `CHANGELOG.md` — Round 8 entry added
+
+---
+
+---
+
+## Session 12 — Synthetic Datasets
+
+**What we discussed:**
+- Adding 5 synthetic datasets designed to stress-test specific optimizer properties
+- Whether sklearn contained any of these (yes — `make_classification` and `make_moons` used)
+
+**What was built:**
+- `synthetic_datasets.py` (new) — 5 dataset generators + `SYNTHETIC_LOADERS` registry:
+  - `illcond`: ill-conditioned Gaussian (κ=1000), 64 features — tests curvature handling
+  - `sparse`: 5 informative out of 100 features via `make_classification` — tests coordinate adaptivity
+  - `noisy_grad`: 30% random label flips — tests stochastic robustness
+  - `manifold`: `make_moons` embedded in 64-D — tests nonconvex landscapes
+  - `saddle`: bimodal positive class at ±2 — tests escape from saddle points
+- `train.py` — 5 entries added to `DATASET_INFO` with `"tabular": True`; `get_dataloaders()` delegates to `SYNTHETIC_LOADERS`; `build_model()` raises for non-MLP on tabular data; CLI updated
+- `benchmark.py` — 5 synthetic datasets added to `DATASET_REGISTRY`; ResNet/ViT skipped gracefully for tabular datasets
+- `requirements.txt` — `scikit-learn>=1.3.0` added
+- `tests/test_synthetic.py` (new) — 45 tests covering registry, loader shapes, label validity, NaN checks, standardisation, reproducibility, dataset-specific properties
+- `tests/test_train.py` — updated for new dataset keys and tabular guard; test count 76 → 140
+
+---
+
+---
+
+## Session 13 — Bug Fix and Training Validation
+
+**What we discussed:**
+- Running a full debug and test pass across the project
+- Generating training plots using MNIST and FashionMNIST for speed
+
+**Bug found and fixed:**
+- `visualizer.py`: `FileNotFoundError` when `--save-plot` used a subdirectory (e.g. `plots/foo.png`) and the directory didn't exist. Fixed in both `Visualizer.close()` and `plot_benchmark()` by calling `os.makedirs(..., exist_ok=True)` before `savefig`.
+
+**Training runs completed (all clean):**
+- MNIST / MLP / Adam → 98.0% test acc
+- FashionMNIST / MLP / AdamW → 87.8%
+- MNIST / ResNet-18 / SGD → 98.6%
+- MNIST / MLP / Lion → 96.5%
+- FashionMNIST / MLP / Shampoo → 87.8%
+- illcond (synthetic) / MLP / Adam → 92.8%
+
+Plots saved to `plots/` (gitignored). All 140 tests passing throughout.
+
+---
+
+---
+
+## Session 14 — Training Logger and Plot Directory Enforcement
+
+**What we discussed:**
+- Ensuring all plots always go into a folder (not the project root)
+- Adding structured logging of training runs: timestamped session folders, per-run epoch/batch logs, and an overall summary file
+
+**What was built:**
+- `logger.py` (new) — `TrainingLogger` class:
+  - Creates `logs/<YYYY-MM-DD_HH-MM-SS>/` at session start
+  - `log_run(config, history)` writes `<dataset>_<model>_<optimizer>.log` with epoch-wise CSV and batch-wise step losses
+  - `close()` writes `run_summary.log` with timing, run count, and final results table
+- `train.py` — default `--save-plot` changed to `plots/training_curves.png`; `--log-dir` flag added; `main()` collects history and calls `TrainingLogger`
+- `benchmark.py` — default `--save-plot` changed to `plots/benchmark.png`; `--log-dir` flag added; `run_benchmark()` accepts optional logger; `main()` wires it all together
+
+All 140 tests still passing.
+
+---
+
+---
+
+## Session 15 — Debug and Test Pass
+
+**What we discussed:**
+- Running a full debug-and-test pass after the logger and plot enforcement changes from Session 14
+
+**Training runs completed (all clean):**
+- MNIST / MLP / Adam → 97.97% test acc
+- FashionMNIST / MLP / AdamW → 88.23%
+- FashionMNIST / MLP / Lion → 85.90%
+- MNIST / MLP / Shampoo → 97.96%
+- MNIST / ResNet-18 / SGD → 98.72%
+
+**Verified:**
+- All plots saved to `plots/training_curves.png` (no stray files in project root)
+- Each run creates `logs/<YYYY-MM-DD_HH-MM-SS>/` with `run_summary.log` + per-run `.log` containing epoch-wise CSV and batch-wise step losses
+- All 140 tests continue to pass
+
+---
+
+## Current State (start of next session)
+
+| Component | Status |
+|---|---|
+| Models | MLP, ResNet-18, ViT |
+| Datasets | MNIST, FashionMNIST, CIFAR-10, CIFAR-100, Tiny ImageNet + 5 synthetic (illcond, sparse, noisy_grad, manifold, saddle) |
+| Optimizers | 11 total |
+| Tests | 140 passing |
+| CI | GitHub Actions, green on `main` |
+| Active branch | `new_feature` (branched from `main`) — commit and push here, PR to merge into `main` when ready |
+| GitHub | https://github.com/honghaoyu12/OptimizerProject |
+| Known bugs | None |
