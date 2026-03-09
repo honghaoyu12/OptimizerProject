@@ -154,14 +154,38 @@ def save_checkpoint(
     }, path)
 
 
-def build_optimizer(name: str, params, lr: float, weight_decay: float = 0.0):
+def make_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
+    """Split parameters into decay / no-decay groups.
+
+    1-D parameters (biases, LayerNorm and BatchNorm weights/biases) are
+    excluded from weight decay. All other parameters (weight matrices,
+    conv filters, embeddings) are placed in the decay group.
+    """
+    decay, no_decay = [], []
+    for p in model.parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim >= 2:
+            decay.append(p)
+        else:
+            no_decay.append(p)
+    return [
+        {"params": decay,    "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
+def build_optimizer(name: str, model: nn.Module, lr: float, weight_decay: float = 0.0):
     name = name.lower()
     if name not in OPTIMIZER_REGISTRY:
         raise ValueError(
             f"Unknown optimizer '{name}'. "
             f"Available: {list(OPTIMIZER_REGISTRY.keys())}"
         )
-    return OPTIMIZER_REGISTRY[name](params, lr, weight_decay)
+    if weight_decay > 0.0:
+        params = make_param_groups(model, weight_decay)
+        return OPTIMIZER_REGISTRY[name](params, lr, 0.0)  # wd set per-group
+    return OPTIMIZER_REGISTRY[name](model.parameters(), lr, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -741,7 +765,7 @@ def main():
 
     # Components
     train_loader, test_loader = get_dataloaders(args.dataset, args.batch_size, args.data_dir)
-    optimizer = build_optimizer(args.optimizer, model.parameters(), args.lr, args.weight_decay)
+    optimizer = build_optimizer(args.optimizer, model, args.lr, args.weight_decay)
     criterion = nn.CrossEntropyLoss()
     scheduler = SCHEDULER_REGISTRY[args.scheduler](optimizer, args.epochs, args.warmup_epochs)
     print(f"Optimizer    : {optimizer.__class__.__name__}  (lr={args.lr})")

@@ -14,6 +14,7 @@ from train import (
     build_optimizer,
     evaluate,
     linear_layer_names,
+    make_param_groups,
     run_training,
     set_seed,
     train_one_epoch,
@@ -139,7 +140,7 @@ class TestTrainingLoop:
         device = torch.device("cpu")
         info = DATASET_INFO["mnist"]
         model = build_model(model_name, info, hidden_sizes=[32, 16]).to(device)
-        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        optimizer = build_optimizer("adam", model, lr=1e-3)
         criterion = nn.CrossEntropyLoss()
         loader = dummy_loader(n=64, in_channels=1, image_size=28, num_classes=10)
         layer_names = linear_layer_names(model)
@@ -326,7 +327,7 @@ class TestEarlyStopping:
         device = torch.device("cpu")
         info = DATASET_INFO["mnist"]
         model = build_model("mlp", info, hidden_sizes=[16]).to(device)
-        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        optimizer = build_optimizer("adam", model, lr=1e-3)
         criterion = nn.CrossEntropyLoss()
         loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10, batch_size=32)
         layer_names = linear_layer_names(model)
@@ -345,7 +346,7 @@ class TestEarlyStopping:
         device = torch.device("cpu")
         info = DATASET_INFO["mnist"]
         model = build_model("mlp", info, hidden_sizes=[16]).to(device)
-        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        optimizer = build_optimizer("adam", model, lr=1e-3)
         criterion = nn.CrossEntropyLoss()
         loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10, batch_size=32)
         layer_names = linear_layer_names(model)
@@ -368,7 +369,7 @@ class TestGradientClipping:
         device = torch.device("cpu")
         info = DATASET_INFO["mnist"]
         model = build_model("mlp", info, hidden_sizes=[16]).to(device)
-        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        optimizer = build_optimizer("adam", model, lr=1e-3)
         criterion = nn.CrossEntropyLoss()
         loader = dummy_loader(n=n, in_channels=1, image_size=28, num_classes=10, batch_size=batch_size)
         layer_names = linear_layer_names(model)
@@ -423,19 +424,19 @@ class TestWeightDecay:
         from train import OPTIMIZER_REGISTRY
         model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
         for name in OPTIMIZER_REGISTRY:
-            opt = build_optimizer(name, model.parameters(), lr=1e-3, weight_decay=1e-4)
+            opt = build_optimizer(name, model, lr=1e-3, weight_decay=1e-4)
             assert opt is not None
 
     def test_weight_decay_stored_in_param_groups(self):
-        """build_optimizer with weight_decay=1e-4 stores it in param_groups."""
-        opt = build_optimizer("adam", build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16]).parameters(),
-                              lr=1e-3, weight_decay=1e-4)
+        """build_optimizer with weight_decay=1e-4 stores it in param_groups (decay group)."""
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        opt = build_optimizer("adam", model, lr=1e-3, weight_decay=1e-4)
         assert opt.param_groups[0]["weight_decay"] == pytest.approx(1e-4)
 
     def test_weight_decay_zero_default(self):
         """build_optimizer without weight_decay defaults to 0.0."""
-        opt = build_optimizer("adam", build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16]).parameters(),
-                              lr=1e-3)
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        opt = build_optimizer("adam", model, lr=1e-3)
         assert opt.param_groups[0]["weight_decay"] == 0.0
 
     def test_train_one_epoch_with_weight_decay(self):
@@ -443,7 +444,7 @@ class TestWeightDecay:
         device = torch.device("cpu")
         info = DATASET_INFO["mnist"]
         model = build_model("mlp", info, hidden_sizes=[16]).to(device)
-        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3, weight_decay=1e-3)
+        optimizer = build_optimizer("adam", model, lr=1e-3, weight_decay=1e-3)
         criterion = nn.CrossEntropyLoss()
         loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10)
         layer_names = linear_layer_names(model)
@@ -470,6 +471,52 @@ class TestWeightDecay:
         norm_with_wd = _run(1.0)
         assert norm_with_wd < norm_no_wd
 
+    def test_make_param_groups_two_groups(self):
+        """make_param_groups returns exactly 2 dicts with 'params' and 'weight_decay' keys."""
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[32, 16])
+        groups = make_param_groups(model, 1e-4)
+        assert len(groups) == 2
+        for g in groups:
+            assert "params" in g
+            assert "weight_decay" in g
+
+    def test_make_param_groups_no_overlap(self):
+        """No parameter id appears in both groups."""
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[32, 16])
+        groups = make_param_groups(model, 1e-4)
+        ids_decay = {id(p) for p in groups[0]["params"]}
+        ids_no_decay = {id(p) for p in groups[1]["params"]}
+        assert ids_decay.isdisjoint(ids_no_decay)
+
+    def test_make_param_groups_covers_all_params(self):
+        """Union of both groups equals the set of all trainable parameter ids."""
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[32, 16])
+        groups = make_param_groups(model, 1e-4)
+        all_ids = {id(p) for p in model.parameters() if p.requires_grad}
+        group_ids = {id(p) for g in groups for p in g["params"]}
+        assert group_ids == all_ids
+
+    def test_bias_params_have_zero_decay(self):
+        """All 1-D parameters (biases, norm params) land in the no-decay group."""
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[32, 16])
+        groups = make_param_groups(model, 1e-4)
+        no_decay_ids = {id(p) for p in groups[1]["params"]}
+        for p in model.parameters():
+            if p.requires_grad and p.ndim < 2:
+                assert id(p) in no_decay_ids
+        assert groups[1]["weight_decay"] == 0.0
+
+    def test_weight_matrices_have_nonzero_decay(self):
+        """All 2-D+ parameters (weight matrices) land in the decay group."""
+        target_wd = 1e-4
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[32, 16])
+        groups = make_param_groups(model, target_wd)
+        decay_ids = {id(p) for p in groups[0]["params"]}
+        for p in model.parameters():
+            if p.requires_grad and p.ndim >= 2:
+                assert id(p) in decay_ids
+        assert groups[0]["weight_decay"] == pytest.approx(target_wd)
+
 
 # ---------------------------------------------------------------------------
 # Seed / reproducibility
@@ -483,7 +530,7 @@ class TestSeed:
         device = torch.device("cpu")
         info = DATASET_INFO["mnist"]
         model = build_model("mlp", info, hidden_sizes=[32, 16]).to(device)
-        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        optimizer = build_optimizer("adam", model, lr=1e-3)
         criterion = nn.CrossEntropyLoss()
         loader = dummy_loader(n=64, in_channels=1, image_size=28, num_classes=10)
         layer_names = linear_layer_names(model)

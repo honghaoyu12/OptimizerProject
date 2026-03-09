@@ -23,7 +23,7 @@ def make_model_and_loss():
 def one_step(optimizer_name: str, lr: float = 1e-3):
     """Build the named optimizer, run one step, return the model."""
     model = nn.Linear(16, 4)
-    opt = build_optimizer(optimizer_name, model.parameters(), lr=lr)
+    opt = build_optimizer(optimizer_name, model, lr=lr)
     x = torch.randn(8, 16)
     loss = model(x).sum()
     loss.backward()
