@@ -47,6 +47,7 @@ OptimizerProject/
 ├── CHANGELOG.md          # Technical history of all file changes
 ├── SESSION_LOG.md        # Narrative log of all project discussions and decisions
 ├── LR_GUIDE.md           # Guide to LR finder and LR scheduler — what they do and how to use them together
+├── ARCHITECTURE.md       # Full architecture diagram: components, data flows, import graph, extension points
 └── README.md
 ```
 
