@@ -4,6 +4,30 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 15 — Per-Parameter Group Weight Decay
+
+### `train.py`
+- **New helper `make_param_groups(model, weight_decay)`** — splits trainable parameters into two groups: `ndim >= 2` (weight matrices, conv filters) receive the specified `weight_decay`; `ndim < 2` (biases, LayerNorm and BatchNorm weights/biases) always receive `weight_decay=0.0`.
+- **`build_optimizer()` signature change** — first positional argument changed from a parameter iterator (`params`) to `nn.Module` (`model`). When `weight_decay > 0`, the optimizer is constructed with per-group params from `make_param_groups()`; when `weight_decay == 0`, falls back to `model.parameters()` unchanged.
+- Updated call site in `main()` accordingly.
+
+### `tests/test_train.py`
+- All existing `build_optimizer(name, model.parameters(), ...)` calls updated to `build_optimizer(name, model, ...)`.
+- Added `make_param_groups` to imports.
+- Added 5 new tests in `TestWeightDecay`:
+  - `test_make_param_groups_two_groups` — returns exactly 2 dicts with `params` and `weight_decay` keys
+  - `test_make_param_groups_no_overlap` — no parameter id appears in both groups
+  - `test_make_param_groups_covers_all_params` — union of both groups equals all trainable parameter ids
+  - `test_bias_params_have_zero_decay` — all `ndim < 2` params land in the no-decay group
+  - `test_weight_matrices_have_nonzero_decay` — all `ndim >= 2` params land in the decay group
+
+### `tests/test_optimizers.py`
+- Updated the one call site that passed `model.parameters()` to `build_optimizer`.
+
+Total tests: 239 (up from 234).
+
+---
+
 ## Round 14 — LR Range Test (LRFinder)
 
 ### New file: `lr_finder.py`

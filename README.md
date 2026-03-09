@@ -33,7 +33,7 @@ OptimizerProject/
 │   ├── test_models.py        # 17 tests for MLP, ResNet18, and ViT
 │   ├── test_optimizers.py    # 37 tests for all 14 optimizers
 │   ├── test_metrics.py       # 9 tests for Hessian trace and sharpness
-│   ├── test_train.py         # 68 tests for datasets, build_model, training loop, schedulers, early stopping, grad clipping
+│   ├── test_train.py         # 73 tests for datasets, build_model, training loop, schedulers, early stopping, grad clipping, weight decay
 │   ├── test_synthetic.py     # 52 tests for the five synthetic datasets
 │   ├── test_logger.py        # 30 tests for TrainingLogger
 │   ├── test_checkpoints.py   # 5 tests for checkpoint save/restore
@@ -121,7 +121,7 @@ python train.py --patience 5 --min-delta 1e-4
 # Gradient clipping
 python train.py --max-grad-norm 1.0
 
-# Weight decay
+# Weight decay (biases and norm-layer parameters are automatically excluded)
 python train.py --weight-decay 1e-4
 
 # Reproducibility
@@ -169,7 +169,7 @@ python train.py --model vit --dataset cifar10 --optimizer adamw --epochs 15 \
 --patience       early stopping patience (0 = disabled)             (default: 0)
 --min-delta      min val-loss improvement to reset patience counter  (default: 0.0)
 --max-grad-norm  clip global gradient norm (None = disabled)
---weight-decay   L2 weight decay coefficient                         (default: 0.0)
+--weight-decay   L2 weight decay (biases and norm params excluded)   (default: 0.0)
 --seed           random seed for reproducibility
 --checkpoint-dir directory to save best.pt and final.pt
 --find-lr        run LR range test before training

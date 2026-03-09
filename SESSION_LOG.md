@@ -364,6 +364,23 @@ Total tests: 234 (up from 227). CI green on `main`.
 
 ---
 
+## Session 19 — Per-Parameter Group Weight Decay
+
+**What we discussed:**
+- `build_optimizer()` was applying weight decay uniformly to all parameters, including biases and normalization-layer parameters where L2 regularization is harmful
+- The standard fix: decay only `ndim >= 2` parameters (weight matrices, conv filters); exclude `ndim < 2` parameters (biases, LayerNorm/BatchNorm weights and biases)
+
+**What was built:**
+- `train.py`:
+  - `make_param_groups(model, weight_decay)` — new helper; splits trainable params into decay (`ndim >= 2`) and no-decay (`ndim < 2`) groups
+  - `build_optimizer()` — signature updated: accepts `nn.Module` instead of a parameter iterator; uses `make_param_groups()` when `weight_decay > 0`, falls back to `model.parameters()` otherwise
+- `tests/test_train.py` — all existing call sites updated; `make_param_groups` added to imports; 5 new tests in `TestWeightDecay`
+- `tests/test_optimizers.py` — updated the one `build_optimizer(name, model.parameters(), ...)` call
+
+Total tests: 239 (up from 234). CI green on `main`.
+
+---
+
 ## Current State
 
 | Component | Status |
@@ -374,9 +391,10 @@ Total tests: 234 (up from 227). CI green on `main`.
 | Schedulers | none, cosine, step, warmup_cosine |
 | Early stopping | patience-based, restores best-epoch weights |
 | Gradient clipping | global norm clipping via `--max-grad-norm` |
+| Weight decay | per-parameter-group via `make_param_groups()` — biases and norm params excluded |
 | LR range test | `lr_finder.py` + `--find-lr` in `train.py` |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
-| Tests | 234 passing |
+| Tests | 239 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |
