@@ -242,6 +242,26 @@ Plots saved to `plots/` (gitignored). All 140 tests passing throughout.
 
 ---
 
+---
+
+## Session 14 — Training Logger and Plot Directory Enforcement
+
+**What we discussed:**
+- Ensuring all plots always go into a folder (not the project root)
+- Adding structured logging of training runs: timestamped session folders, per-run epoch/batch logs, and an overall summary file
+
+**What was built:**
+- `logger.py` (new) — `TrainingLogger` class:
+  - Creates `logs/<YYYY-MM-DD_HH-MM-SS>/` at session start
+  - `log_run(config, history)` writes `<dataset>_<model>_<optimizer>.log` with epoch-wise CSV and batch-wise step losses
+  - `close()` writes `run_summary.log` with timing, run count, and final results table
+- `train.py` — default `--save-plot` changed to `plots/training_curves.png`; `--log-dir` flag added; `main()` collects history and calls `TrainingLogger`
+- `benchmark.py` — default `--save-plot` changed to `plots/benchmark.png`; `--log-dir` flag added; `run_benchmark()` accepts optional logger; `main()` wires it all together
+
+All 140 tests still passing.
+
+---
+
 ## Current State (start of next session)
 
 | Component | Status |
@@ -253,4 +273,4 @@ Plots saved to `plots/` (gitignored). All 140 tests passing throughout.
 | CI | GitHub Actions, green on `main` |
 | Active branch | `new_feature` (branched from `main`) — commit and push here, PR to merge into `main` when ready |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
-| Known bugs | None — all fixed |
+| Known bugs | None |

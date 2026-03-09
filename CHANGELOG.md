@@ -4,6 +4,32 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 11 — Training Logger and Plot Directory Enforcement
+
+### New file: `logger.py`
+
+`TrainingLogger` class for structured logging of training sessions.
+
+- `__init__(log_dir)` — creates a timestamped subdirectory `logs/<YYYY-MM-DD_HH-MM-SS>/` at session start.
+- `log_run(config, history)` — writes one `<dataset>_<model>_<optimizer>.log` per run containing:
+  - Header: run name, timestamp, all config key-value pairs.
+  - `[epoch-wise]` CSV section: `epoch, train_loss, train_acc, test_loss, test_acc, time_elapsed_s`.
+  - `[batch-wise]` CSV section: `step, loss` for every training batch across all epochs.
+- `close()` — writes `run_summary.log` with session start/end times, elapsed seconds, total run count, and a formatted results table (train loss, train acc%, test loss, test acc% per run).
+
+### `train.py`
+- Default `--save-plot` changed from `training_curves.png` → `plots/training_curves.png`.
+- New `--log-dir` flag (default: `logs/`).
+- `main()` now collects a `history` dict (train/test loss and acc per epoch, cumulative `time_elapsed`, all `step_losses`) during the epoch loop, then calls `TrainingLogger.log_run()` and `close()` after training.
+
+### `benchmark.py`
+- Default `--save-plot` changed from `benchmark.png` → `plots/benchmark.png`.
+- New `--log-dir` flag (default: `logs/`).
+- `run_benchmark()` accepts an optional `logger: TrainingLogger` argument; calls `log_run()` after each (dataset, model, optimizer) run.
+- `main()` creates a `TrainingLogger`, passes it to `run_benchmark()`, and calls `close()` after all runs.
+
+---
+
 ## Round 10 — Bug Fix and Training Validation
 
 ### `visualizer.py`
