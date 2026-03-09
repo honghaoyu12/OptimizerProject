@@ -13,6 +13,7 @@ Shows six panels that update after every epoch:
 """
 
 import math
+import os
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -122,6 +123,7 @@ class Visualizer:
         """Render final figure, save to file, and close interactive mode."""
         self._redraw()
         if self.save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(self.save_path)), exist_ok=True)
             self.fig.savefig(self.save_path, dpi=150, bbox_inches="tight")
             print(f"\nFigure saved to {self.save_path}")
         if self.live:
@@ -319,6 +321,7 @@ def plot_benchmark(
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"\nBenchmark figure saved to {save_path}")
 
