@@ -13,6 +13,7 @@ Optional CLI flags let you set shared hyperparameters without re-running:
 """
 
 import argparse
+import os
 from collections import OrderedDict
 
 import torch
@@ -21,7 +22,7 @@ import torch.nn as nn
 from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian
-from train import DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders, linear_layer_names, run_training, set_seed
+from train import DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders, linear_layer_names, run_training, save_checkpoint, set_seed
 from visualizer import plot_benchmark
 
 
@@ -215,6 +216,7 @@ def run_benchmark(
     max_grad_norm: float | None = None,
     weight_decays: list[float] | None = None,
     seed: int | None = None,
+    checkpoint_dir: str | None = None,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -261,6 +263,16 @@ def run_benchmark(
                     layer_names = linear_layer_names(model)
                     scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
 
+                    run_ckpt_dir = None
+                    if checkpoint_dir:
+                        run_ckpt_dir = os.path.join(
+                            checkpoint_dir,
+                            f"{ds_key}_{mdl_name.lower()}_{opt_name.lower().replace('+', '_')}",
+                        )
+                    run_cfg = {
+                        "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
+                        "lr": lr, "epochs": epochs, "weight_decay": wd,
+                    }
                     history = run_training(
                         model, train_loader, test_loader,
                         optimizer, criterion, device,
@@ -269,6 +281,8 @@ def run_benchmark(
                         patience=patience,
                         min_delta=min_delta,
                         max_grad_norm=max_grad_norm,
+                        checkpoint_dir=run_ckpt_dir,
+                        checkpoint_config=run_cfg,
                     )
                     results[(ds_name, mdl_name, series_name)] = history
 
@@ -326,6 +340,8 @@ def parse_args():
                    help="Weight decay values to sweep (e.g. --weight-decays 0 1e-4 1e-3)")
     p.add_argument("--seed", default=None, type=int,
                    help="Random seed for reproducibility (default: None, non-deterministic)")
+    p.add_argument("--checkpoint-dir", default=None,
+                   help="Save best.pt and final.pt under this directory per run (default: disabled)")
     return p.parse_args()
 
 
@@ -387,6 +403,7 @@ def main():
         max_grad_norm=args.max_grad_norm,
         weight_decays=args.weight_decays,
         seed=args.seed,
+        checkpoint_dir=args.checkpoint_dir,
     )
     logger.close()
 
