@@ -350,6 +350,7 @@ def weight_norms(model: nn.Module, layer_names: list[str]) -> dict[str, float]:
 def train_one_epoch(
     model, loader, optimizer, criterion, device, layer_names,
     global_step_offset: int = 0,
+    max_grad_norm: float | None = None,
 ) -> dict:
     """Run one training epoch.
 
@@ -359,8 +360,9 @@ def train_one_epoch(
         loss                : float  — average per-sample cross-entropy
         acc                 : float  — fraction of correct predictions
         grad_norms_per_layer: dict[str, float]  — mean grad L2 norm per linear layer
-        grad_norm_global    : float  — L2 norm across all parameter gradients
+        grad_norm_global    : float  — L2 norm across all parameter gradients (post-clip)
         grad_norm_std       : float  — std of per-parameter gradient norms
+        grad_norm_before_clip: float — L2 norm across all parameter gradients (pre-clip)
         step_losses         : list[float]  — per-batch loss values
     """
     model.train()
@@ -368,7 +370,8 @@ def train_one_epoch(
     grad_accum = {n: 0.0 for n in layer_names}
     num_batches = 0
     step_losses: list[float] = []
-    all_grad_norms: list[float] = []
+    all_raw_norms: list[float] = []   # pre-clip per-param norms across all batches
+    all_grad_norms: list[float] = []  # post-clip per-param norms across all batches
 
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
@@ -385,13 +388,24 @@ def train_one_epoch(
                     grad_accum[layer_names[idx]] += module.weight.grad.norm().item()
                 idx += 1
 
-        # Global gradient norm across all parameters
+        # Pre-clip global gradient norm for this batch
         param_grad_norms = [
             p.grad.norm().item()
             for p in model.parameters()
             if p.grad is not None
         ]
-        all_grad_norms.extend(param_grad_norms)
+        all_raw_norms.extend(param_grad_norms)
+
+        if max_grad_norm is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            post_clip_norms = [
+                p.grad.norm().item()
+                for p in model.parameters()
+                if p.grad is not None
+            ]
+            all_grad_norms.extend(post_clip_norms)
+        else:
+            all_grad_norms.extend(param_grad_norms)
 
         optimizer.step()
         total_loss += loss.item() * images.size(0)
@@ -404,6 +418,7 @@ def train_one_epoch(
 
     import statistics
     grad_norm_global = float(sum(g ** 2 for g in all_grad_norms) ** 0.5) if all_grad_norms else 0.0
+    grad_norm_before_clip = float(sum(g ** 2 for g in all_raw_norms) ** 0.5) if all_raw_norms else 0.0
     grad_norm_std = float(statistics.stdev(all_grad_norms)) if len(all_grad_norms) > 1 else 0.0
 
     return {
@@ -412,6 +427,7 @@ def train_one_epoch(
         "grad_norms_per_layer": avg_grad_norms,
         "grad_norm_global": grad_norm_global,
         "grad_norm_std": grad_norm_std,
+        "grad_norm_before_clip": grad_norm_before_clip,
         "step_losses": step_losses,
     }
 
@@ -442,6 +458,7 @@ def run_training(
     scheduler=None,
     patience: int = 0,
     min_delta: float = 0.0,
+    max_grad_norm: float | None = None,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -457,6 +474,7 @@ def run_training(
         target_accuracy_time       : float | None
         grad_norm_global           : list[float]
         grad_norm_std              : list[float]
+        grad_norm_before_clip      : list[float]  — pre-clip global norm per epoch
         hessian_trace              : list[float]  — NaN if compute_hessian=False
         sharpness                  : list[float]  — NaN if compute_hessian=False
         step_losses                : list[float]  — all batch-level losses across epochs
@@ -474,6 +492,7 @@ def run_training(
         "target_accuracy_time": None,
         "grad_norm_global": [],
         "grad_norm_std": [],
+        "grad_norm_before_clip": [],
         "hessian_trace": [],
         "sharpness": [],
         "step_losses": [],
@@ -501,6 +520,7 @@ def run_training(
         epoch_result = train_one_epoch(
             model, train_loader, optimizer, criterion, device, layer_names,
             global_step_offset=global_step_offset,
+            max_grad_norm=max_grad_norm,
         )
         global_step_offset += len(epoch_result["step_losses"])
 
@@ -517,6 +537,7 @@ def run_training(
         history["time_elapsed"].append(elapsed)
         history["grad_norm_global"].append(epoch_result["grad_norm_global"])
         history["grad_norm_std"].append(epoch_result["grad_norm_std"])
+        history["grad_norm_before_clip"].append(epoch_result["grad_norm_before_clip"])
         history["step_losses"].extend(epoch_result["step_losses"])
 
         for n in layer_names:
@@ -592,6 +613,8 @@ def parse_args():
                    help="Early stopping patience epochs (0 = disabled)")
     p.add_argument("--min-delta", default=0.0, type=float,
                    help="Min val-loss improvement to reset patience counter")
+    p.add_argument("--max-grad-norm", default=None, type=float,
+                   help="Clip global gradient norm to this value (None = disabled)")
     return p.parse_args()
 
 
@@ -628,6 +651,8 @@ def main():
     print(f"Scheduler    : {args.scheduler}")
     if args.patience > 0:
         print(f"Early stopping: patience={args.patience}, min_delta={args.min_delta}")
+    if args.max_grad_norm is not None:
+        print(f"Grad clipping : max_norm={args.max_grad_norm}")
     print()
 
     # Visualizer
@@ -661,7 +686,8 @@ def main():
         history["learning_rates"].append(current_lr)
 
         epoch_result = train_one_epoch(
-            model, train_loader, optimizer, criterion, device, layer_names
+            model, train_loader, optimizer, criterion, device, layer_names,
+            max_grad_norm=args.max_grad_norm,
         )
         train_loss = epoch_result["loss"]
         train_acc  = epoch_result["acc"]
@@ -714,16 +740,17 @@ def main():
 
     # Write logs
     config = {
-        "dataset":      args.dataset,
-        "model":        args.model,
-        "optimizer":    args.optimizer,
-        "lr":           args.lr,
-        "epochs":       args.epochs,
-        "batch_size":   args.batch_size,
-        "hidden_sizes": args.hidden_sizes,
-        "scheduler":    args.scheduler,
-        "patience":     args.patience,
-        "min_delta":    args.min_delta,
+        "dataset":       args.dataset,
+        "model":         args.model,
+        "optimizer":     args.optimizer,
+        "lr":            args.lr,
+        "epochs":        args.epochs,
+        "batch_size":    args.batch_size,
+        "hidden_sizes":  args.hidden_sizes,
+        "scheduler":     args.scheduler,
+        "patience":      args.patience,
+        "min_delta":     args.min_delta,
+        "max_grad_norm": args.max_grad_norm,
     }
     logger = TrainingLogger(log_dir=args.log_dir)
     logger.log_run(config, history)

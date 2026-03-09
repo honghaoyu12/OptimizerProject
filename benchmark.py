@@ -197,6 +197,7 @@ def run_benchmark(
     warmup_epochs: int = 5,
     patience: int = 0,
     min_delta: float = 0.0,
+    max_grad_norm: float | None = None,
 ) -> dict:
     """Train every (dataset, model, optimizer) triple and collect histories.
 
@@ -243,20 +244,22 @@ def run_benchmark(
                     scheduler=scheduler,
                     patience=patience,
                     min_delta=min_delta,
+                    max_grad_norm=max_grad_norm,
                 )
                 results[(ds_name, mdl_name, opt_name)] = history
 
                 if logger is not None:
                     config = {
-                        "dataset":    ds_key,
-                        "model":      mdl_name,
-                        "optimizer":  opt_name,
-                        "lr":         lr,
-                        "epochs":     epochs,
-                        "batch_size": batch_size,
-                        "scheduler":  scheduler_name,
-                        "patience":   patience,
-                        "min_delta":  min_delta,
+                        "dataset":       ds_key,
+                        "model":         mdl_name,
+                        "optimizer":     opt_name,
+                        "lr":            lr,
+                        "epochs":        epochs,
+                        "batch_size":    batch_size,
+                        "scheduler":     scheduler_name,
+                        "patience":      patience,
+                        "min_delta":     min_delta,
+                        "max_grad_norm": max_grad_norm,
                     }
                     logger.log_run(config, history)
 
@@ -291,6 +294,8 @@ def parse_args():
                    help="Early stopping patience epochs (0 = disabled)")
     p.add_argument("--min-delta", default=0.0, type=float,
                    help="Min val-loss improvement to reset patience counter")
+    p.add_argument("--max-grad-norm", default=None, type=float,
+                   help="Clip global gradient norm to this value (None = disabled)")
     return p.parse_args()
 
 
@@ -330,6 +335,7 @@ def main():
         warmup_epochs=args.warmup_epochs,
         patience=args.patience,
         min_delta=args.min_delta,
+        max_grad_norm=args.max_grad_norm,
     )
     logger.close()
 

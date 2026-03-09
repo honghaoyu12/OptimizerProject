@@ -149,7 +149,7 @@ class TestTrainingLoop:
         result = train_one_epoch(model, loader, opt, crit, device, names)
         assert set(result.keys()) == {
             "loss", "acc", "grad_norms_per_layer",
-            "grad_norm_global", "grad_norm_std", "step_losses",
+            "grad_norm_global", "grad_norm_std", "grad_norm_before_clip", "step_losses",
         }
 
     def test_train_one_epoch_loss_finite(self):
@@ -356,3 +356,57 @@ class TestEarlyStopping:
         )
         assert history["early_stopped_epoch"] is None
         assert len(history["train_loss"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Gradient Clipping
+# ---------------------------------------------------------------------------
+
+class TestGradientClipping:
+    def _setup(self, n=32, batch_size=32):
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16]).to(device)
+        optimizer = build_optimizer("adam", model.parameters(), lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        loader = dummy_loader(n=n, in_channels=1, image_size=28, num_classes=10, batch_size=batch_size)
+        layer_names = linear_layer_names(model)
+        return model, optimizer, criterion, device, loader, layer_names
+
+    def test_no_clipping_when_none(self):
+        model, opt, crit, device, loader, names = self._setup()
+        result = train_one_epoch(model, loader, opt, crit, device, names, max_grad_norm=None)
+        assert "grad_norm_before_clip" in result
+        assert result["grad_norm_before_clip"] == pytest.approx(result["grad_norm_global"])
+
+    def test_clipping_caps_norm(self):
+        # Single batch so accumulated post-clip global norm == per-batch clipped norm
+        model, opt, crit, device, loader, names = self._setup(n=32, batch_size=32)
+        max_norm = 1e-6
+        result = train_one_epoch(model, loader, opt, crit, device, names, max_grad_norm=max_norm)
+        assert result["grad_norm_global"] <= max_norm + 1e-8
+
+    def test_no_clip_when_norm_below_threshold(self):
+        model, opt, crit, device, loader, names = self._setup()
+        result = train_one_epoch(model, loader, opt, crit, device, names, max_grad_norm=1e9)
+        assert result["grad_norm_before_clip"] == pytest.approx(result["grad_norm_global"])
+
+    def test_run_training_history_key_present(self):
+        model, opt, crit, device, loader, names = self._setup()
+        history = run_training(
+            model, loader, loader, opt, crit,
+            device, epochs=3, layer_names=names,
+            verbose=False, max_grad_norm=1.0,
+        )
+        assert "grad_norm_before_clip" in history
+        assert len(history["grad_norm_before_clip"]) == 3
+
+    def test_run_training_no_clipping_parity(self):
+        model, opt, crit, device, loader, names = self._setup()
+        history = run_training(
+            model, loader, loader, opt, crit,
+            device, epochs=3, layer_names=names,
+            verbose=False, max_grad_norm=None,
+        )
+        for before, after in zip(history["grad_norm_before_clip"], history["grad_norm_global"]):
+            assert before == pytest.approx(after)
