@@ -130,6 +130,29 @@ class EarlyStopping:
             model.load_state_dict({k: v.to(device) for k, v in self.best_state.items()})
 
 
+def save_checkpoint(
+    path: str,
+    epoch: int,
+    model: nn.Module,
+    optimizer,
+    metrics: dict,
+    config: dict | None = None,
+) -> None:
+    """Save a training checkpoint to *path*.
+
+    The saved dict contains:
+      epoch, model_state_dict, optimizer_state_dict, metrics, config
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    torch.save({
+        "epoch":                epoch,
+        "model_state_dict":     model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "metrics":              metrics,
+        "config":               config or {},
+    }, path)
+
+
 def build_optimizer(name: str, params, lr: float, weight_decay: float = 0.0):
     name = name.lower()
     if name not in OPTIMIZER_REGISTRY:
@@ -487,6 +510,8 @@ def run_training(
     patience: int = 0,
     min_delta: float = 0.0,
     max_grad_norm: float | None = None,
+    checkpoint_dir: str | None = None,
+    checkpoint_config: dict | None = None,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -529,6 +554,10 @@ def run_training(
     }
 
     es = EarlyStopping(patience, min_delta)
+    best_test_acc: float = -1.0
+
+    if checkpoint_dir:
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
     # Fixed batch for Hessian/sharpness (reuse same batch each epoch)
     hessian_batch = None
@@ -572,6 +601,17 @@ def run_training(
             history["weight_norms"][n].append(w_norms.get(n, float("nan")))
             history["grad_norms"][n].append(epoch_result["grad_norms_per_layer"].get(n, float("nan")))
 
+        # Best checkpoint
+        if checkpoint_dir and test_acc > best_test_acc:
+            best_test_acc = test_acc
+            save_checkpoint(
+                os.path.join(checkpoint_dir, "best.pt"),
+                epoch, model, optimizer,
+                metrics={"train_loss": train_loss, "train_acc": train_acc,
+                         "test_loss": test_loss,   "test_acc": test_acc},
+                config=checkpoint_config,
+            )
+
         if history["target_accuracy_epoch"] is None and test_acc >= target_acc:
             history["target_accuracy_epoch"] = epoch
             history["target_accuracy_time"] = elapsed
@@ -603,6 +643,19 @@ def run_training(
                 print(f"  Early stopping at epoch {epoch} "
                       f"(best val loss {es.best_loss:.4f})")
             break
+
+    # Final checkpoint
+    if checkpoint_dir and history["train_loss"]:
+        last = len(history["train_loss"]) - 1
+        save_checkpoint(
+            os.path.join(checkpoint_dir, "final.pt"),
+            last + 1, model, optimizer,
+            metrics={"train_loss": history["train_loss"][last],
+                     "train_acc":  history["train_acc"][last],
+                     "test_loss":  history["test_loss"][last],
+                     "test_acc":   history["test_acc"][last]},
+            config=checkpoint_config,
+        )
 
     return history
 
@@ -647,6 +700,8 @@ def parse_args():
                    help="L2 weight decay coefficient (default: 0.0, disabled)")
     p.add_argument("--seed", default=None, type=int,
                    help="Random seed for reproducibility (default: None, non-deterministic)")
+    p.add_argument("--checkpoint-dir", default=None,
+                   help="Directory to save best.pt and final.pt checkpoints (default: disabled)")
     return p.parse_args()
 
 
@@ -692,6 +747,8 @@ def main():
         print(f"Weight decay  : {args.weight_decay:g}")
     if args.seed is not None:
         print(f"Seed          : {args.seed}")
+    if args.checkpoint_dir:
+        print(f"Checkpoints   : {args.checkpoint_dir}/")
     print()
 
     # Visualizer
@@ -718,6 +775,14 @@ def main():
         "early_stopped_epoch": None,
     }
     es = EarlyStopping(args.patience, args.min_delta)
+    best_test_acc: float = -1.0
+    if args.checkpoint_dir:
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
+    run_config = {
+        "dataset": args.dataset, "model": args.model, "optimizer": args.optimizer,
+        "lr": args.lr, "epochs": args.epochs, "batch_size": args.batch_size,
+        "scheduler": args.scheduler, "weight_decay": args.weight_decay, "seed": args.seed,
+    }
     run_start = time.time()
 
     for epoch in range(1, args.epochs + 1):
@@ -752,6 +817,16 @@ def main():
         history["time_elapsed"].append(time.time() - run_start)
         history["step_losses"].extend(epoch_result["step_losses"])
 
+        if args.checkpoint_dir and test_acc > best_test_acc:
+            best_test_acc = test_acc
+            save_checkpoint(
+                os.path.join(args.checkpoint_dir, "best.pt"),
+                epoch, model, optimizer,
+                metrics={"train_loss": train_loss, "train_acc": train_acc,
+                         "test_loss": test_loss,   "test_acc": test_acc},
+                config=run_config,
+            )
+
         if vis is not None:
             vis.update(
                 epoch, train_loss, test_loss, train_acc, test_acc,
@@ -776,6 +851,19 @@ def main():
 
     if vis is not None:
         vis.close()
+
+    # Final checkpoint
+    if args.checkpoint_dir and history["train_loss"]:
+        last = len(history["train_loss"]) - 1
+        save_checkpoint(
+            os.path.join(args.checkpoint_dir, "final.pt"),
+            last + 1, model, optimizer,
+            metrics={"train_loss": history["train_loss"][last],
+                     "train_acc":  history["train_acc"][last],
+                     "test_loss":  history["test_loss"][last],
+                     "test_acc":   history["test_acc"][last]},
+            config=run_config,
+        )
 
     # Write logs
     config = {
