@@ -35,7 +35,7 @@ from visualizer import Visualizer
 
 import numpy as np
 
-from optimizers import VanillaSGD, Lion, LAMB, Shampoo
+from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +65,9 @@ OPTIMIZER_REGISTRY: dict = {
     "lion":        lambda p, lr, wd: Lion(p, lr=lr, weight_decay=wd),
     "lamb":        lambda p, lr, wd: LAMB(p, lr=lr, weight_decay=wd),
     "shampoo":     lambda p, lr, wd: Shampoo(p, lr=lr, weight_decay=wd),
+    "muon":        lambda p, lr, wd: Muon(p, lr=lr, weight_decay=wd),
+    "adan":        lambda p, lr, wd: Adan(p, lr=lr, weight_decay=wd),
+    "adahessian":  lambda p, lr, wd: AdaHessian(p, lr=lr, weight_decay=wd),
     # --- ADD YOUR OPTIMIZER HERE ---
     # "my_optimizer": lambda p, lr, wd: MyOptimizer(p, lr=lr, weight_decay=wd),
 }
@@ -395,7 +398,15 @@ def train_one_epoch(
         optimizer.zero_grad()
         logits = model(images)
         loss = criterion(logits, labels)
-        loss.backward()
+        if getattr(optimizer, "requires_create_graph", False):
+            # Use autograd.grad so gradients are differentiable graph nodes
+            # (needed for HVP computation in second-order optimizers).
+            trainable = [p for p in model.parameters() if p.requires_grad]
+            grads = torch.autograd.grad(loss, trainable, create_graph=True)
+            for p, g in zip(trainable, grads):
+                p.grad = g
+        else:
+            loss.backward()
 
         # Accumulate gradient norms per linear layer
         idx = 0
