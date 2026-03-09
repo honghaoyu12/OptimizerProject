@@ -4,6 +4,28 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 10 — Bug Fix and Training Validation
+
+### `visualizer.py`
+- **Bug fix**: `Visualizer.close()` and `plot_benchmark()` both raised `FileNotFoundError` when `--save-plot` pointed to a subdirectory (e.g. `plots/foo.png`) that did not yet exist. Fixed by adding `os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)` before each `savefig` call.
+- Added `import os` to module imports.
+
+### Training validation
+Six end-to-end training runs confirmed clean after the fix:
+
+| Config | Final test acc |
+|---|---|
+| MNIST / MLP / Adam | 98.0% |
+| FashionMNIST / MLP / AdamW | 87.8% |
+| MNIST / ResNet-18 / SGD | 98.6% |
+| MNIST / MLP / Lion | 96.5% |
+| FashionMNIST / MLP / Shampoo | 87.8% |
+| illcond (synthetic) / MLP / Adam | 92.8% |
+
+Plots saved to `plots/`. All 140 tests continue to pass.
+
+---
+
 ## Round 9 — Synthetic Datasets
 
 ### New file: `synthetic_datasets.py`

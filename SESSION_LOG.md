@@ -219,6 +219,29 @@ A chronological record of everything discussed and built across all conversation
 
 ---
 
+---
+
+## Session 13 — Bug Fix and Training Validation
+
+**What we discussed:**
+- Running a full debug and test pass across the project
+- Generating training plots using MNIST and FashionMNIST for speed
+
+**Bug found and fixed:**
+- `visualizer.py`: `FileNotFoundError` when `--save-plot` used a subdirectory (e.g. `plots/foo.png`) and the directory didn't exist. Fixed in both `Visualizer.close()` and `plot_benchmark()` by calling `os.makedirs(..., exist_ok=True)` before `savefig`.
+
+**Training runs completed (all clean):**
+- MNIST / MLP / Adam → 98.0% test acc
+- FashionMNIST / MLP / AdamW → 87.8%
+- MNIST / ResNet-18 / SGD → 98.6%
+- MNIST / MLP / Lion → 96.5%
+- FashionMNIST / MLP / Shampoo → 87.8%
+- illcond (synthetic) / MLP / Adam → 92.8%
+
+Plots saved to `plots/` (gitignored). All 140 tests passing throughout.
+
+---
+
 ## Current State (start of next session)
 
 | Component | Status |
@@ -230,3 +253,4 @@ A chronological record of everything discussed and built across all conversation
 | CI | GitHub Actions, green on `main` |
 | Active branch | `new_feature` (branched from `main`) — commit and push here, PR to merge into `main` when ready |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
+| Known bugs | None — all fixed |
