@@ -317,6 +317,7 @@ def run_benchmark(
     seed: int | None = None,
     checkpoint_dir: str | None = None,
     num_seeds: int = 1,
+    target_acc: float = 0.95,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -403,6 +404,7 @@ def run_benchmark(
                                 patience=patience,
                                 min_delta=min_delta,
                                 max_grad_norm=max_grad_norm,
+                                target_acc=target_acc,
                                 checkpoint_dir=run_ckpt_dir,
                                 checkpoint_config=run_cfg,
                             )
@@ -468,6 +470,8 @@ def parse_args():
                    help="Save path for the Markdown benchmark report ('' to disable)")
     p.add_argument("--num-seeds", default=1, type=int,
                    help="Seeds to average over per run (default: 1 = single run)")
+    p.add_argument("--target-acc", default=0.95, type=float,
+                   help="Accuracy threshold for convergence speed columns in report (default: 0.95)")
     return p.parse_args()
 
 
@@ -540,6 +544,7 @@ def main():
         seed=args.seed,
         checkpoint_dir=args.checkpoint_dir,
         num_seeds=args.num_seeds,
+        target_acc=args.target_acc,
     )
     logger.close()
 
@@ -557,6 +562,7 @@ def main():
             "lrs": args.lrs,
             "seed": args.seed,
             "num_seeds": args.num_seeds,
+            "target_acc": args.target_acc,
         }
         generate_report(results, report_cfg, save_path=args.report_path)
         print(f"\n  Report saved to {args.report_path}")

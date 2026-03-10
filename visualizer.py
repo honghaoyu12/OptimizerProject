@@ -339,6 +339,11 @@ def plot_benchmark(
                     hi = [v + s for v, s in zip(values, std_vals)]
                     ax.fill_between(epochs, lo, hi, color=color, alpha=0.15)
 
+                if key == "test_acc":
+                    tae = history.get("target_accuracy_epoch")
+                    if tae is not None:
+                        ax.axvline(x=tae, color=color, linestyle=":", linewidth=1.2, alpha=0.7)
+
             ax.legend(fontsize=7)
             ax.tick_params(labelsize=7)
 

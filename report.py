@@ -69,6 +69,8 @@ def generate_report(
     lrs         = config.get("lrs", None)
     seed        = config.get("seed", None)
     num_seeds   = config.get("num_seeds", 1)
+    target_acc  = config.get("target_acc", 0.95)
+    target_pct  = int(round(target_acc * 100))
 
     wd_str   = ", ".join(str(w) for w in (wds or [0.0]))
     lr_str   = ", ".join(str(l) for l in lrs) if lrs else "per-optimizer defaults"
@@ -89,6 +91,7 @@ def generate_report(
         f"| LRs | {lr_str} |",
         f"| Seed | {seed} |",
         f"| Seeds | {seed_str} |",
+        f"| Target acc | {target_pct}% |",
         "",
     ]
 
@@ -101,8 +104,8 @@ def generate_report(
     for ds, mdl in combos:
         lines += [f"### {ds} / {mdl}", ""]
         lines += [
-            "| Optimizer | Final Test Acc (%) | Best Test Acc (%) | Epochs Run | Time (s) | Train-Test Gap (%) |",
-            "|---|---|---|---|---|---|",
+            f"| Optimizer | Final Test Acc (%) | Best Test Acc (%) | Epochs to {target_pct}% | Time to {target_pct}% (s) | Epochs Run | Time (s) | Train-Test Gap (%) |",
+            "|---|---|---|---|---|---|---|---|",
         ]
 
         rows = []
@@ -130,12 +133,17 @@ def generate_report(
             final_str = f"{final_acc:.2f} ± {final_std:.2f}" if final_std is not None else f"{final_acc:.2f}"
             best_str  = f"{best_acc:.2f} ± {best_std:.2f}"   if best_std  is not None else f"{best_acc:.2f}"
 
-            rows.append((series, final_acc, final_str, best_str, ep_run, total_time, gap))
+            conv_epoch = hist.get("target_accuracy_epoch")
+            conv_time  = hist.get("target_accuracy_time")
+            conv_ep_str   = f"{conv_epoch:.1f}" if conv_epoch is not None else "—"
+            conv_time_str = f"{conv_time:.1f}"  if conv_time  is not None else "—"
+
+            rows.append((series, final_acc, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap))
 
         rows.sort(key=lambda r: r[1], reverse=True)
-        for series, _, final_str, best_str, ep_run, total_time, gap in rows:
+        for series, _, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap in rows:
             lines.append(
-                f"| {series} | {final_str} | {best_str} | {ep_run} | {total_time:.1f} | {gap:.2f} |"
+                f"| {series} | {final_str} | {best_str} | {conv_ep_str} | {conv_time_str} | {ep_run} | {total_time:.1f} | {gap:.2f} |"
             )
         lines.append("")
 
@@ -219,10 +227,15 @@ def generate_report(
             final_str = f"{final_acc:.1f} ± {final_std:.1f}" if final_std is not None else f"{final_acc:.1f}"
             best_str  = f"{best_acc:.1f} ± {best_std:.1f}"   if best_std  is not None else f"{best_acc:.1f}"
 
+            conv_epoch = hist.get("target_accuracy_epoch")
+            conv_time  = hist.get("target_accuracy_time")
+
             line = (
                 f"- **{d} / {m}**: {final_str}% final, {best_str}% peak "
                 f"({ep_run} epochs, {total_time:.1f} s)"
             )
+            if conv_epoch is not None:
+                line += f", reached {target_pct}% at epoch {conv_epoch:.1f} ({conv_time:.1f} s)"
             if gap > 5.0:
                 line += f" ⚠️ high train-test gap ({gap:.1f}%)"
             if early_ep is not None:

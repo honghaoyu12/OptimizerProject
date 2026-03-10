@@ -112,6 +112,22 @@ def test_multiple_optimizers_rankings_present():
     assert "Fastest" in out
 
 
+def test_report_convergence_columns_present():
+    """Report Results table includes 'Epochs to X%' and 'Time to X%' column headers."""
+    results = _make_results()
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "Epochs to" in out
+    assert "Time to" in out
+
+
+def test_report_convergence_dash_when_none():
+    """target_accuracy_epoch absent from history → '—' appears in the report."""
+    results = _make_results()
+    # _make_results() does not set target_accuracy_epoch, so it defaults to None
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "—" in out
+
+
 def test_report_shows_std_when_present():
     """history with 'test_acc_std' key → '±' appears in the report output."""
     results = _make_results()

@@ -107,6 +107,20 @@ def test_num_seeds_adds_std_keys():
     assert "train_loss_std" in hist
 
 
+def test_target_acc_low_populates_convergence_epoch():
+    """target_acc=0.0 guarantees epoch 1 is recorded for every run."""
+    results = _run(target_acc=0.0)
+    hist = next(iter(results.values()))
+    assert hist.get("target_accuracy_epoch") is not None
+
+
+def test_target_acc_high_gives_none():
+    """target_acc=1.0 (impossible) gives None convergence epoch."""
+    results = _run(target_acc=1.0)
+    hist = next(iter(results.values()))
+    assert hist.get("target_accuracy_epoch") is None
+
+
 def test_num_seeds_one_no_std_keys():
     """num_seeds=1 produces no aggregation '_std' keys (identical to current behaviour).
 
