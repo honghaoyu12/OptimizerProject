@@ -3,7 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian
+from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor
 from train import build_optimizer, OPTIMIZER_REGISTRY
 
 
@@ -41,7 +41,7 @@ class TestOptimizerRegistry:
         expected = {
             "adam", "adamw", "nadam", "radam", "adagrad",
             "sgd", "rmsprop", "vanilla_sgd", "lion", "lamb", "shampoo",
-            "muon", "adan", "adahessian",
+            "muon", "adan", "adahessian", "adabelief", "signsgd", "adafactor",
         }
         assert expected == set(OPTIMIZER_REGISTRY.keys())
 
@@ -337,3 +337,155 @@ class TestAdaHessian:
 
         # HVP-based estimate differs from pure squared gradient
         assert not torch.allclose(exp_hess / (1 - 0.999), sq_grad, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# AdaBelief
+# ---------------------------------------------------------------------------
+
+class TestAdaBelief:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = AdaBelief(model.parameters(), lr=1e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "exp_avg" in opt.state[p]
+            assert "exp_avg_belief" in opt.state[p]
+            assert "step" in opt.state[p]
+
+    def test_step_counter_increments(self):
+        model = nn.Linear(8, 4)
+        opt = AdaBelief(model.parameters(), lr=1e-3)
+        for _ in range(3):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert opt.state[p]["step"] == 3
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = AdaBelief(model.parameters(), lr=1e-3)
+        for _ in range(10):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_weight_decay_shrinks_params(self):
+        def _run(wd):
+            torch.manual_seed(0)
+            model = nn.Linear(4, 2, bias=False)
+            nn.init.constant_(model.weight, 1.0)
+            opt = AdaBelief(model.parameters(), lr=1e-3, weight_decay=wd)
+            model(torch.randn(2, 4)).sum().backward()
+            opt.step()
+            return model.weight.norm().item()
+
+        assert _run(1.0) < _run(0.0)
+
+
+# ---------------------------------------------------------------------------
+# SignSGD
+# ---------------------------------------------------------------------------
+
+class TestSignSGD:
+    def test_update_uses_sign(self):
+        """All weight changes should be exactly ±lr (sign update)."""
+        model = nn.Linear(4, 2, bias=False)
+        nn.init.constant_(model.weight, 0.0)
+        lr = 0.01
+        opt = SignSGD(model.parameters(), lr=lr)
+        model(torch.ones(1, 4)).sum().backward()
+        w_before = model.weight.data.clone()
+        opt.step()
+        delta = (model.weight.data - w_before).abs()
+        # Every element should change by exactly lr
+        assert torch.allclose(delta, torch.full_like(delta, lr))
+
+    def test_momentum_buffer_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = SignSGD(model.parameters(), lr=0.01, momentum=0.9)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "momentum_buffer" in opt.state[p]
+
+    def test_no_momentum_buffer_without_momentum(self):
+        model = nn.Linear(8, 4)
+        opt = SignSGD(model.parameters(), lr=0.01, momentum=0.0)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "momentum_buffer" not in opt.state[p]
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = SignSGD(model.parameters(), lr=0.01, momentum=0.9)
+        for _ in range(10):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+
+# ---------------------------------------------------------------------------
+# AdaFactor
+# ---------------------------------------------------------------------------
+
+class TestAdaFactor:
+    def test_factored_state_for_2d(self):
+        """2-D weight matrix should use row/col factors, not full second moment."""
+        model = nn.Linear(8, 4)   # weight: 4×8
+        opt = AdaFactor(model.parameters(), lr=1e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        w = model.weight
+        assert opt.state[w]["factored"] is True
+        assert "exp_avg_sq_row" in opt.state[w]
+        assert "exp_avg_sq_col" in opt.state[w]
+        assert "exp_avg_sq" not in opt.state[w]
+
+    def test_non_factored_state_for_1d(self):
+        """1-D bias should use the full second moment (no factoring)."""
+        model = nn.Linear(8, 4)   # bias: (4,)
+        opt = AdaFactor(model.parameters(), lr=1e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        b = model.bias
+        assert opt.state[b]["factored"] is False
+        assert "exp_avg_sq" in opt.state[b]
+
+    def test_row_col_factor_shapes(self):
+        """Row factor shape == (out,), col factor shape == (in,) for Linear weight."""
+        model = nn.Linear(8, 4, bias=False)   # weight: 4×8
+        opt = AdaFactor(model.parameters(), lr=1e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        w = model.weight
+        assert opt.state[w]["exp_avg_sq_row"].shape == (4,)
+        assert opt.state[w]["exp_avg_sq_col"].shape == (8,)
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = AdaFactor(model.parameters(), lr=1e-3)
+        for _ in range(10):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_relative_step_mode(self):
+        """lr=None (relative step) should also produce finite weights."""
+        model = nn.Linear(8, 4)
+        opt = AdaFactor(model.parameters(), lr=None)
+        for _ in range(5):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()

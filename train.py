@@ -36,7 +36,7 @@ from lr_finder import LRFinder
 
 import numpy as np
 
-from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian
+from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +69,9 @@ OPTIMIZER_REGISTRY: dict = {
     "muon":        lambda p, lr, wd: Muon(p, lr=lr, weight_decay=wd),
     "adan":        lambda p, lr, wd: Adan(p, lr=lr, weight_decay=wd),
     "adahessian":  lambda p, lr, wd: AdaHessian(p, lr=lr, weight_decay=wd),
+    "adabelief":   lambda p, lr, wd: AdaBelief(p, lr=lr, weight_decay=wd),
+    "signsgd":     lambda p, lr, wd: SignSGD(p, lr=lr, weight_decay=wd),
+    "adafactor":   lambda p, lr, wd: AdaFactor(p, lr=lr, weight_decay=wd),
     # --- ADD YOUR OPTIMIZER HERE ---
     # "my_optimizer": lambda p, lr, wd: MyOptimizer(p, lr=lr, weight_decay=wd),
 }

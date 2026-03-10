@@ -21,7 +21,7 @@ import torch.nn as nn
 
 from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
-from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian
+from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor
 from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
@@ -138,6 +138,21 @@ OPTIMIZER_REGISTRY: OrderedDict = OrderedDict([
         "factory":    lambda p, lr, wd: AdaHessian(p, lr=lr, weight_decay=wd),
         "default_lr": 0.1,
         "color":      "#e6ab02",   # gold
+    }),
+    ("AdaBelief",    {
+        "factory":    lambda p, lr, wd: AdaBelief(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.001,
+        "color":      "#7f7f7f",   # grey
+    }),
+    ("SignSGD",      {
+        "factory":    lambda p, lr, wd: SignSGD(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.01,
+        "color":      "#aec7e8",   # light blue
+    }),
+    ("AdaFactor",    {
+        "factory":    lambda p, lr, wd: AdaFactor(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.001,
+        "color":      "#ffbb78",   # light orange
     }),
     # --- ADD YOUR CUSTOM OPTIMIZER HERE ---
     # ("MyOptimizer", {
