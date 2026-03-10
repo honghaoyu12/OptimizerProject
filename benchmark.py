@@ -25,6 +25,7 @@ from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, S
 from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
+from report import generate_report
 from visualizer import plot_benchmark
 
 
@@ -381,6 +382,8 @@ def parse_args():
                    help="Random seed for reproducibility (default: None, non-deterministic)")
     p.add_argument("--checkpoint-dir", default=None,
                    help="Save best.pt and final.pt under this directory per run (default: disabled)")
+    p.add_argument("--report-path", default="reports/benchmark_report.md",
+                   help="Save path for the Markdown benchmark report ('' to disable)")
     return p.parse_args()
 
 
@@ -458,6 +461,19 @@ def main():
     # ── Plot ──────────────────────────────────────────────────────────────
     save_path = args.save_plot if args.save_plot else None
     plot_benchmark(results, dataset_names, model_names, series_names, opt_colors, save_path=save_path)
+
+    # ── Report ────────────────────────────────────────────────────────────
+    if args.report_path:
+        report_cfg = {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "scheduler": args.scheduler,
+            "weight_decays": args.weight_decays,
+            "lrs": args.lrs,
+            "seed": args.seed,
+        }
+        generate_report(results, report_cfg, save_path=args.report_path)
+        print(f"\n  Report saved to {args.report_path}")
 
 
 if __name__ == "__main__":
