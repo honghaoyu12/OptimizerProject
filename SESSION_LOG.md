@@ -381,20 +381,74 @@ Total tests: 239 (up from 234). CI green on `main`.
 
 ---
 
+## Session 20 — LR Sweep in benchmark.py
+
+**What we discussed:**
+- `benchmark.py` had `--lr` (single value override) but couldn't sweep multiple LRs
+- Needed parity with `--weight-decays` which already supports sweeping
+- Combined LR + WD sweeps should produce series names like `"Adam (lr=0.001, wd=1e-4)"`
+
+**What was built:**
+- `benchmark.py` — `--lr` renamed to `--lrs` (nargs="+"); single value = global override (no suffix, backward-compatible); multiple values = LR sweep (adds `lr=<val>` suffix); `run_benchmark()` inner loop restructured to iterate over `lr_list`; param groups now use `make_param_groups()` when `wd > 0` (matching `train.py` pattern); series colors use `tab20` cmap when sweeping
+- `tests/test_benchmark.py` (new) — 6 tests: per-optimizer defaults, single override, two-value sweep, combined LR+WD suffix, WD-only sweep
+
+Total tests: 245 (up from 239). CI green on `main`.
+
+---
+
+## Session 21 — AdaBelief, SignSGD, and AdaFactor
+
+**What we discussed:**
+- Adding three optimizers that cover different design strategies: belief-adjusted adaptivity, sign-based updates, and memory-efficient factored second moments
+
+**What was built:**
+- `optimizers/adabelief.py` — AdaBelief (Zhang et al., 2020): belief EMA `s = β₂·s + (1-β₂)·(g-m)² + ε` adapts step size by gradient surprise; default lr=1e-3
+- `optimizers/signsgd.py` — SignSGD (Bernstein et al., 2018): pure sign updates `±lr`; optional Signum momentum buffer; default lr=1e-2
+- `optimizers/adafactor.py` — AdaFactor (Shazeer & Stern, 2018): factored row/column second moment marginals for `O(m+n)` memory; annealing `β₂` via `_rho()`; default lr=1e-3
+- `optimizers/__init__.py` — exports all three
+- `train.py` — OPTIMIZER_REGISTRY extended with `adabelief`, `signsgd`, `adafactor`
+- `benchmark.py` — OPTIMIZER_REGISTRY extended (AdaBelief grey, SignSGD light blue, AdaFactor light orange)
+- `tests/test_optimizers.py` — TestAdaBelief (4 tests), TestSignSGD (4 tests), TestAdaFactor (5 tests) added
+
+Total tests: 258 (up from 245). CI green on `main`.
+
+---
+
+## Session 22 — Sophia, Prodigy, and Schedule-Free AdamW
+
+**What we discussed:**
+- Sophia: second-order optimizer with clipped Hessian diagonal, a complement to AdaHessian
+- Prodigy: removes the need to tune LR by estimating the step scale automatically
+- Schedule-Free AdamW: eliminates LR schedules by averaging iterates
+
+**What was built:**
+- `optimizers/sophia.py` — Sophia (Liu et al., 2023): HVP every `update_freq=10` steps; `requires_create_graph = True`; Hessian initialized to ones; falls back to `g²` without `create_graph`; update clipped to `[-ρ, ρ]` relative to `h`; default lr=1e-4
+- `optimizers/prodigy.py` — Prodigy (Mishchenko & Defazio, 2023): `d` and `A` stored in `param_groups` (survive `state_dict`); per-param `x0`, `s`, `exp_avg`, `exp_avg_sq`; two-pass step (update d then apply Adam with `eff_lr = d * lr`); default lr=1.0
+- `optimizers/schedule_free.py` — ScheduleFreeAdamW (Defazio et al., NeurIPS 2024): params = `y = (1-β₁)x + β₁z`; `x` stored in state; `z` reconstructed each step; `get_averaged_params()` returns `x` tensors; default lr=1e-3
+- `optimizers/__init__.py` — exports all three
+- `train.py` — OPTIMIZER_REGISTRY extended with `sophia`, `prodigy`, `sf_adamw` (20 total)
+- `benchmark.py` — OPTIMIZER_REGISTRY extended (Sophia purple, Prodigy crimson, SF-AdamW green; 19 total)
+- `tests/test_optimizers.py` — TestSophia (4 tests), TestProdigy (4 tests), TestScheduleFreeAdamW (4 tests) added
+
+Total tests: 276 (up from 258). CI green on `main`.
+
+---
+
 ## Current State
 
 | Component | Status |
 |---|---|
 | Models | MLP, ResNet-18, ViT |
 | Datasets | MNIST, FashionMNIST, CIFAR-10, CIFAR-100, Tiny ImageNet + 5 synthetic |
-| Optimizers | 14 total (adam, adamw, nadam, radam, adagrad, sgd, rmsprop, vanilla_sgd, lion, lamb, shampoo, muon, adan, adahessian) |
+| Optimizers | 20 in `train.py` (adam, adamw, nadam, radam, adagrad, sgd, rmsprop, vanilla_sgd, lion, lamb, shampoo, muon, adan, adahessian, adabelief, signsgd, adafactor, sophia, prodigy, sf_adamw); 19 in `benchmark.py` |
 | Schedulers | none, cosine, step, warmup_cosine |
 | Early stopping | patience-based, restores best-epoch weights |
 | Gradient clipping | global norm clipping via `--max-grad-norm` |
 | Weight decay | per-parameter-group via `make_param_groups()` — biases and norm params excluded |
 | LR range test | `lr_finder.py` + `--find-lr` in `train.py` |
+| LR sweep | `--lrs` in `benchmark.py` — single value = override, multiple = sweep with series labels |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
-| Tests | 239 passing |
+| Tests | 276 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

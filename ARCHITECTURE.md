@@ -59,6 +59,12 @@ to serve that core loop.
 │  │ SYNTHETIC_LOADERS dict │  │ muon.py → Muon                            │  │
 │  └────────────────────────┘  │ adan.py → Adan                            │  │
 │                               │ adahessian.py → AdaHessian                │  │
+│                               │ adabelief.py → AdaBelief                  │  │
+│                               │ signsgd.py → SignSGD                      │  │
+│                               │ adafactor.py → AdaFactor                  │  │
+│                               │ sophia.py → Sophia                        │  │
+│                               │ prodigy.py → Prodigy                      │  │
+│                               │ schedule_free.py → ScheduleFreeAdamW      │  │
 │  ┌────────────────────────┐  └───────────────────────────────────────────┘  │
 │  │     lr_finder.py       │                                                  │
 │  │ ─────────────────────  │                                                  │
@@ -140,11 +146,17 @@ optimizers/
 ├── shampoo.py     ← Shampoo; Kronecker-factored preconditioners (CPU eigendecomp)
 ├── muon.py        ← Muon; Nesterov + orthogonalization of the update matrix
 ├── adan.py        ← Adan; adaptive Nesterov momentum
-└── adahessian.py  ← AdaHessian; Hessian diagonal approximation (needs create_graph=True)
+├── adahessian.py  ← AdaHessian; Hessian diagonal approximation (needs create_graph=True)
+├── adabelief.py   ← AdaBelief; belief EMA adapts step size by gradient surprise
+├── signsgd.py     ← SignSGD; pure sign updates with optional Signum momentum
+├── adafactor.py   ← AdaFactor; factored second moment (O(m+n) memory for 2-D params)
+├── sophia.py      ← Sophia; Hutchinson Hessian clipping (needs create_graph=True)
+├── prodigy.py     ← Prodigy; parameter-free auto-scaling via inner product estimates
+└── schedule_free.py ← ScheduleFreeAdamW; Polyak averaging replaces LR schedule
 ```
 
-All are registered in `train.py`'s `OPTIMIZER_REGISTRY` (14 entries including the standard
-PyTorch ones) and available in `benchmark.py`'s registry.
+All are registered in `train.py`'s `OPTIMIZER_REGISTRY` (20 entries including the standard
+PyTorch ones) and available in `benchmark.py`'s registry (19 entries with display colors).
 
 **Contribution to the goal:** The primary subject under study. Adding a new optimizer means
 implementing one file extending `BaseOptimizer`, importing it in `train.py`, and adding one
@@ -349,7 +361,13 @@ train.py
        ├── shampoo.py
        ├── muon.py
        ├── adan.py
-       └── adahessian.py
+       ├── adahessian.py
+       ├── adabelief.py
+       ├── signsgd.py
+       ├── adafactor.py
+       ├── sophia.py
+       ├── prodigy.py
+       └── schedule_free.py
 
 benchmark.py
  ├── train.py  (run_training, get_dataloaders, DATASET_INFO, SCHEDULER_REGISTRY,
@@ -401,7 +419,7 @@ All diagnostics, logging, visualization, and tests work automatically.
 | File | Tests | What is verified |
 |---|---|---|
 | `test_train.py` | 73 | DATASET_INFO, build_model (incl. tabular guard), train_one_epoch, run_training, EarlyStopping, gradient clipping, scheduler integration, weight decay (make_param_groups) |
-| `test_optimizers.py` | 37 | All 14 optimizers: factory, one-step finite weights, state dict, VanillaSGD direction, Lion momentum, LAMB trust ratio, Shampoo Kronecker state, AdaHessian create_graph |
+| `test_optimizers.py` | 55 | All 20 optimizers: factory, one-step finite weights, state dict, optimizer-specific state and behaviour |
 | `test_synthetic.py` | 52 | SYNTHETIC_LOADERS registry, tensor shapes, label ranges, NaN checks, standardization correctness, reproducibility |
 | `test_logger.py` | 30 | log_run(), close(), CSV/JSON schema, multi-run aggregation, edge cases |
 | `test_models.py` | 17 | MLP hidden_sizes variants, ResNet18 forward, ViT forward, param counts, device transfer |
@@ -409,7 +427,8 @@ All diagnostics, logging, visualization, and tests work automatically.
 | `test_plot_from_logs.py` | 9 | load_session(), reconstruct_results(), series naming, weight-decay sweeps |
 | `test_lr_finder.py` | 7 | history keys/length, monotone LR, state restoration (weights + LR), suggestion range, AdaHessian path |
 | `test_checkpoints.py` | 5 | save_checkpoint(), load, config keys, best vs final checkpoint logic |
-| **Total** | **239** | |
+| `test_benchmark.py` | 6 | run_benchmark() LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes |
+| **Total** | **276** | |
 
 ---
 

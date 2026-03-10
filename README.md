@@ -27,18 +27,25 @@ OptimizerProject/
 │   ├── shampoo.py        # Shampoo — Kronecker-factored second-order
 │   ├── muon.py           # Muon — Momentum + Nesterov + orthogonalisation
 │   ├── adan.py           # Adan — Adaptive Nesterov Momentum
-│   └── adahessian.py     # AdaHessian — second-order adaptive (Hessian diagonal)
+│   ├── adahessian.py     # AdaHessian — second-order adaptive (Hessian diagonal)
+│   ├── adabelief.py      # AdaBelief — belief-adjusted adaptive step sizes
+│   ├── signsgd.py        # SignSGD — pure sign updates with optional momentum
+│   ├── adafactor.py      # AdaFactor — memory-efficient factored second moment
+│   ├── sophia.py         # Sophia — Hutchinson Hessian clipping
+│   ├── prodigy.py        # Prodigy — parameter-free auto-scaling step size
+│   └── schedule_free.py  # ScheduleFreeAdamW — iterate averaging, no schedule needed
 ├── tests/
 │   ├── __init__.py
 │   ├── test_models.py        # 17 tests for MLP, ResNet18, and ViT
-│   ├── test_optimizers.py    # 37 tests for all 14 optimizers
+│   ├── test_optimizers.py    # 55 tests for all 20 optimizers
 │   ├── test_metrics.py       # 9 tests for Hessian trace and sharpness
 │   ├── test_train.py         # 73 tests for datasets, build_model, training loop, schedulers, early stopping, grad clipping, weight decay
 │   ├── test_synthetic.py     # 52 tests for the five synthetic datasets
 │   ├── test_logger.py        # 30 tests for TrainingLogger
 │   ├── test_checkpoints.py   # 5 tests for checkpoint save/restore
 │   ├── test_plot_from_logs.py# 9 tests for log-replay plotting
-│   └── test_lr_finder.py     # 7 tests for LRFinder
+│   ├── test_lr_finder.py     # 7 tests for LRFinder
+│   └── test_benchmark.py     # 6 tests for benchmark.py LR sweep logic
 ├── .github/
 │   └── workflows/
 │       └── ci.yml        # GitHub Actions CI — runs all tests on push/PR
@@ -154,7 +161,9 @@ python train.py --model vit --dataset cifar10 --optimizer adamw --epochs 15 \
 --model          mlp | resnet18 | vit                                (default: mlp)
 --optimizer      adam | adamw | nadam | radam | adagrad |
                  sgd | rmsprop | vanilla_sgd |
-                 lion | lamb | shampoo | muon | adan | adahessian    (default: adam)
+                 lion | lamb | shampoo | muon | adan | adahessian |
+                 adabelief | signsgd | adafactor |
+                 sophia | prodigy | sf_adamw                         (default: adam)
 --lr             learning rate                                        (default: 1e-3)
 --epochs         number of epochs                                    (default: 10)
 --batch-size     mini-batch size                                     (default: 128)
@@ -245,7 +254,7 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --epochs         epochs per run                              (default: 10)
 --batch-size     mini-batch size                             (default: 128)
 --hidden-sizes   MLP hidden layer widths                     (default: 256 128)
---lr             override all optimizer LRs                  (default: per-optimizer defaults)
+--lrs            one or more LR values to sweep               (default: per-optimizer defaults)
 --data-dir       dataset location                            (default: ./data)
 --device         cpu | cuda | mps | auto                    (default: auto)
 --save-plot      output figure path                          (default: plots/benchmark.png)
@@ -325,14 +334,17 @@ printf "1,2\nall\nall\n" | python benchmark.py --epochs 5 --save-plot full_bench
 printf "3\n1,3\n3,5,6,7\n" | python benchmark.py --epochs 10 --save-plot adam_family.png
 
 # Benchmark with a global LR override and cosine scheduling
-python benchmark.py --lr 0.001 --epochs 10 --scheduler cosine
+python benchmark.py --lrs 0.001 --epochs 10 --scheduler cosine
+
+# Benchmark with LR sweep across two values
+python benchmark.py --lrs 1e-3 1e-4 --epochs 10
 ```
 
 ---
 
 ## Testing
 
-The project ships with **234 pytest tests** covering every major component.
+The project ships with **276 pytest tests** covering every major component.
 
 ### Run the tests locally
 
@@ -351,21 +363,22 @@ pytest tests/test_optimizers.py::TestShampoo -v
 pytest tests/test_train.py::TestTrainingLoop::test_loss_decreases_over_epochs -v
 ```
 
-Expected output: `234 passed` in a few seconds (all on CPU, no downloads needed).
+Expected output: `276 passed` in a few seconds (all on CPU, no downloads needed).
 
 ### Test files
 
 | File | Tests | What it covers |
 |---|---|---|
 | `tests/test_models.py` | 17 | MLP, ResNet18, ViT forward passes; output shapes; patch size assertion |
-| `tests/test_optimizers.py` | 37 | Registry completeness; finite weights after one step for all 14 optimizers; optimizer-specific state and behaviour |
+| `tests/test_optimizers.py` | 55 | Registry completeness; finite weights after one step for all 20 optimizers; optimizer-specific state and behaviour |
 | `tests/test_metrics.py` | 9 | Hessian trace (type, finiteness, positivity, NaN on no-param model); sharpness (type, non-negativity, weight restoration, epsilon monotonicity) |
-| `tests/test_train.py` | 68 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers; early stopping; gradient clipping; seed reproducibility |
+| `tests/test_train.py` | 73 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers; early stopping; gradient clipping; weight decay (`make_param_groups`); seed reproducibility |
 | `tests/test_synthetic.py` | 52 | Registry completeness; loader shapes; label validity; NaN checks; standardisation; reproducibility; dataset-specific properties |
 | `tests/test_logger.py` | 30 | `TrainingLogger` session creation; `log_run` file format; `close` summary; edge cases |
 | `tests/test_checkpoints.py` | 5 | Checkpoint save and restore for best and final model states |
 | `tests/test_plot_from_logs.py` | 9 | Log-replay plotting from saved session directories |
 | `tests/test_lr_finder.py` | 7 | History keys/shape; monotone LR schedule; weight/LR state restoration; suggestion range; AdaHessian compatibility |
+| `tests/test_benchmark.py` | 6 | `run_benchmark()` LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes |
 
 ### CI pipeline
 
@@ -453,6 +466,12 @@ Synthetic tabular datasets are MLP-only. ResNet-18 and ViT raise a `ValueError` 
 | `muon` | Muon | `optimizers/muon.py` | 2e-2 |
 | `adan` | Adan | `optimizers/adan.py` | 1e-3 |
 | `adahessian` | AdaHessian | `optimizers/adahessian.py` | 1e-1 |
+| `adabelief` | AdaBelief | `optimizers/adabelief.py` | 1e-3 |
+| `signsgd` | SignSGD | `optimizers/signsgd.py` | 1e-2 |
+| `adafactor` | AdaFactor | `optimizers/adafactor.py` | 1e-3 |
+| `sophia` | Sophia | `optimizers/sophia.py` | 1e-4 |
+| `prodigy` | Prodigy | `optimizers/prodigy.py` | 1.0 |
+| `sf_adamw` | SF-AdamW | `optimizers/schedule_free.py` | 1e-3 |
 
 **Lion** — EvoLved Sign Momentum (Chen et al., 2023). One momentum buffer; every update is the sign of a β₁-interpolated gradient. Use ~10× smaller LR than Adam.
 
@@ -465,6 +484,18 @@ Synthetic tabular datasets are MLP-only. ResNet-18 and ViT raise a `ValueError` 
 **Adan** — Adaptive Nesterov Momentum (Xie et al., 2023). Tracks three moment terms (gradient, gradient difference, gradient difference squared) for more accurate curvature estimates. Default lr=1e-3.
 
 **AdaHessian** — Second-order adaptive optimizer (Yao et al., 2021). Uses the diagonal of the Hessian (estimated via Hutchinson) as a preconditioner. Requires `create_graph=True` during backward. Default lr=0.1.
+
+**AdaBelief** — Adapts the step size based on how "surprising" the gradient is relative to the momentum (Zhang et al., 2020). The belief EMA `s = β₂·s + (1-β₂)·(g-m)² + ε` is small when the gradient matches the running average (confident step) and large when it diverges (cautious step). Default lr=1e-3.
+
+**SignSGD** — Pure sign update: every parameter moves `±lr` regardless of gradient magnitude (Bernstein et al., 2018). Optionally includes a momentum buffer (Signum variant). Memory-efficient — only one buffer, no second moment. Default lr=1e-2.
+
+**AdaFactor** — Memory-efficient adaptive optimizer (Shazeer & Stern, 2018). For 2-D+ tensors, factors the second-moment matrix into row and column marginals (`O(m+n)` storage instead of `O(mn)`). Default lr=1e-3.
+
+**Sophia** — Second-order optimizer using a clipped Hutchinson diagonal Hessian estimate as a preconditioner (Liu et al., 2023). Hessian updated every 10 steps; update clipped to `[-ρ, ρ]` to prevent large steps in high-curvature directions. Requires `create_graph=True`. Default lr=1e-4.
+
+**Prodigy** — Parameter-free optimizer that auto-scales the step size without LR tuning (Mishchenko & Defazio, 2023). Maintains a monotonically non-decreasing scale `d` based on inner products between gradient accumulators and displacement from the initial parameters. Default lr=1.0.
+
+**SF-AdamW** — Schedule-Free AdamW: replaces the LR schedule with Polyak-Ruppert iterate averaging (Defazio et al., NeurIPS 2024). Evaluates gradients at an interpolation point between the running average and the latest iterate. No cosine/step schedule needed. Default lr=1e-3.
 
 #### Schedulers
 
@@ -659,6 +690,12 @@ Interactive script that trains every `(dataset, model, optimizer)` triple and pl
 [11] Muon          magenta      lr=0.02
 [12] Adan          olive        lr=0.001
 [13] AdaHessian    gold         lr=0.1
+[14] AdaBelief     grey         lr=0.001
+[15] SignSGD       light blue   lr=0.01
+[16] AdaFactor     light orange lr=0.001
+[17] Sophia        purple       lr=0.0001
+[18] Prodigy       crimson      lr=1.0
+[19] SF-AdamW      green        lr=0.001
 ```
 
 ---
@@ -723,3 +760,7 @@ A narrative record of how the project was built, session by session. The full lo
 | 16 | Muon, Adan, AdaHessian optimizers | 3 new custom optimizers; 14 total; 37 optimizer tests |
 | 17 | Schedulers, early stopping, grad clipping, checkpoints, log-replay | 4 schedulers; EarlyStopping; grad clipping; `--seed`; `--checkpoint-dir`; `test_checkpoints.py`; `test_plot_from_logs.py` |
 | 18 | LR range test | `lr_finder.py`, `--find-lr` flags in `train.py`, `test_lr_finder.py` (7 tests) |
+| 19 | Per-parameter group weight decay | `make_param_groups()`; biases and norm params excluded; `build_optimizer()` signature updated |
+| 20 | LR sweep in benchmark | `--lr` → `--lrs` (nargs="+"); per-optimizer defaults preserved; series names include `lr=` suffix when sweeping; `test_benchmark.py` (6 tests) |
+| 21 | AdaBelief, SignSGD, AdaFactor | 3 new custom optimizers; belief EMA; sign updates; factored second moment |
+| 22 | Sophia, Prodigy, Schedule-Free AdamW | 3 more optimizers; Hessian clipping; parameter-free scaling; iterate averaging |

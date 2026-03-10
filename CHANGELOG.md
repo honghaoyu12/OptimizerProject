@@ -4,6 +4,116 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 18 — Sophia, Prodigy, and Schedule-Free AdamW
+
+### New files: `optimizers/sophia.py`, `optimizers/prodigy.py`, `optimizers/schedule_free.py`
+
+**`Sophia`** (Liu et al., 2023)
+- Second-order optimizer using a clipped Hutchinson diagonal Hessian estimate as a preconditioner.
+- `requires_create_graph = True` class attribute — `train_one_epoch()` uses `autograd.grad(create_graph=True)` automatically.
+- HVP computed every `update_freq=10` steps (at steps 1, 11, 21, …); falls back to `g²` when `create_graph` is unavailable.
+- Update: `p -= lr * clip(m / h.clamp(min=1e-8), -ρ, ρ)` where `h` is the EMA Hessian diagonal.
+- Default lr=1e-4, rho=0.04.
+
+**`Prodigy`** (Mishchenko & Defazio, 2023)
+- Parameter-free: automatically scales the step size without manual LR tuning.
+- Maintains `d` (monotonically non-decreasing scale) and `A` (accumulator) in `param_groups` so they survive `state_dict()` / `load_state_dict()`.
+- Per-parameter state: `x0` (initial weights), `s` (gradient accumulator), `exp_avg`, `exp_avg_sq`.
+- Two-pass step: first pass updates `s` and computes `d_num`/`g_sq_sum`; second pass applies Adam with `eff_lr = d * lr`.
+- Default lr=1.0 (treated as a global multiplier on `d`).
+
+**`ScheduleFreeAdamW`** (Defazio et al., NeurIPS 2024)
+- Replaces LR schedules with Polyak-Ruppert iterate averaging.
+- Maintains `x` (Polyak average) in state; params are set to `y = (1-β₁)x + β₁z` at each step.
+- `z` reconstructed from `y` and `x` each step: `z = (y - (1-β₁)x) / β₁`.
+- `get_averaged_params()` method returns `x` tensors for final evaluation.
+- Default lr=1e-3.
+
+### `optimizers/__init__.py`
+- Exports `Sophia`, `Prodigy`, `ScheduleFreeAdamW`.
+
+### `train.py`
+- `OPTIMIZER_REGISTRY` extended: `"sophia"`, `"prodigy"`, `"sf_adamw"` added (20 total).
+- Import updated.
+
+### `benchmark.py`
+- `OPTIMIZER_REGISTRY` extended: Sophia (purple, lr=1e-4), Prodigy (crimson, lr=1.0), SF-AdamW (green, lr=1e-3). Total: 19 entries.
+
+### `tests/test_optimizers.py`
+- Added `TestSophia` (4 tests), `TestProdigy` (4 tests), `TestScheduleFreeAdamW` (4 tests).
+- Total: 55 tests (up from 43).
+
+Total tests: 276 (up from 258).
+
+---
+
+## Round 17 — AdaBelief, SignSGD, and AdaFactor
+
+### New files: `optimizers/adabelief.py`, `optimizers/signsgd.py`, `optimizers/adafactor.py`
+
+**`AdaBelief`** (Zhang et al., 2020)
+- Adapts step size by how much the gradient deviates from its running average.
+- Belief EMA: `s = β₂·s + (1-β₂)·(g-m)² + ε` — small when gradient matches momentum (large step), large when surprised (small step).
+- Bias-corrected denominator: `sqrt(s/bc2) + ε`.
+- Decoupled weight decay: `p *= (1 - lr * wd)` before the gradient step.
+- Default lr=1e-3.
+
+**`SignSGD`** (Bernstein et al., 2018)
+- Pure sign update: every parameter moves `±lr` regardless of gradient magnitude.
+- Optional momentum buffer (Signum variant): `direction = (β·buf + (1-β)·g).sign()`.
+- No buffer stored when `β = 0` (plain sign mode).
+- Default lr=1e-2.
+
+**`AdaFactor`** (Shazeer & Stern, 2018)
+- Memory-efficient: for 2-D+ tensors, factors the second-moment matrix into row and column marginals (`O(m+n)` storage instead of `O(mn)`).
+- `_rho(step, beta2_decay)` — `min(1 - step^β₂_decay, 0.999)` gives annealing second moment.
+- Factored reconstruction: `v_approx = row.unsqueeze(-1) * col.unsqueeze(-2) / row_norm`.
+- RMS-based update clipping; optional first moment; supports `lr=None` for relative step.
+- Default lr=1e-3.
+
+### `optimizers/__init__.py`
+- Exports `AdaBelief`, `SignSGD`, `AdaFactor`.
+
+### `train.py`
+- `OPTIMIZER_REGISTRY` extended: `"adabelief"`, `"signsgd"`, `"adafactor"` added (17 total at this point).
+- Import updated.
+
+### `benchmark.py`
+- `OPTIMIZER_REGISTRY` extended: AdaBelief (grey, lr=0.001), SignSGD (light blue, lr=0.01), AdaFactor (light orange, lr=0.001). Total: 16 entries at this point.
+
+### `tests/test_optimizers.py`
+- Added `TestAdaBelief` (4 tests), `TestSignSGD` (4 tests), `TestAdaFactor` (5 tests).
+- Total: 43 tests (up from 30).
+
+Total tests: 258 (up from 245).
+
+---
+
+## Round 16 — LR Sweep in benchmark.py
+
+### `benchmark.py`
+- **`--lr` renamed to `--lrs`** (nargs="+", metavar="LR") — supports one value (global override, no suffix) or multiple values (LR sweep, adds `lr=<val>` suffix to series names). Single-value behavior is fully backward-compatible with the old `--lr`.
+- **`run_benchmark()` signature** — `lr_override: float | None` → `lrs: list[float] | None`.
+- **Inner loop restructured** — added `sweep_lr` flag and `n_lr_vals` counter; body iterates `for lr in lr_list` inside the optimizer loop.
+- **Param groups fixed** — `run_benchmark()` now calls `make_param_groups(model, wd)` when `wd > 0`, matching the `train.py` pattern. Factory is called with `0.0` as weight_decay.
+- **Series naming** — suffixes list built conditionally: `lr=<val>` added when sweeping LR, `wd=<val>` added when sweeping WD; combined when both sweep.
+- **`main()` LR banner** — three-way display: global override / LR sweep / per-optimizer defaults.
+- **`main()` colors** — `sweep_lr or sweep_wd` block uses `tab20` colormap for series colors; single-optimizer single-LR still uses registry colors.
+- Added `make_param_groups` to the `from train import` line.
+
+### `tests/test_benchmark.py` (new)
+- 6 tests:
+  - `test_lrs_none_uses_per_optimizer_default` — series name = bare optimizer name, no suffix
+  - `test_single_lr_no_suffix` — single `lrs=[0.1]` produces no `lr=` suffix
+  - `test_lrs_sweep_creates_two_series` — `lrs=[0.1, 0.01]` → 2 result entries
+  - `test_lr_sweep_series_names_contain_lr` — result keys contain `"lr=0.1"` and `"lr=0.01"`
+  - `test_lr_and_wd_sweep_combined_suffix` — `lrs=[0.1, 0.01]`, `weight_decays=[0.0, 1e-4]` → 4 results, all with both `lr=` and `wd=`
+  - `test_wd_only_sweep_no_lr_suffix` — `lrs=None`, `weight_decays=[0.0, 1e-4]` → 2 results, none with `lr=`
+
+Total tests: 245 (up from 239).
+
+---
+
 ## Round 15 — Per-Parameter Group Weight Decay
 
 ### `train.py`
