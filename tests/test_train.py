@@ -561,3 +561,71 @@ class TestSeed:
         set_seed(7)
         t2 = torch.randn(4)
         assert torch.allclose(t1, t2)
+
+
+# ---------------------------------------------------------------------------
+# AMP
+# ---------------------------------------------------------------------------
+
+class TestAMP:
+    """Tests for amp=True/False in run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, optimizer, criterion, device, layer_names
+
+    def test_amp_disabled_history_keys(self):
+        """amp=False (default): all expected history keys present after training."""
+        model, tl, vl, opt, crit, dev, ln = self._make_components()
+        history = run_training(model, tl, vl, opt, crit, dev, 1, ln, verbose=False, amp=False)
+        for key in ("train_loss", "test_acc", "time_elapsed", "grad_norm_global"):
+            assert key in history
+
+    def test_amp_cpu_noop(self):
+        """amp=True on CPU: auto-disabled with message, training completes normally."""
+        model, tl, vl, opt, crit, dev, ln = self._make_components()
+        history = run_training(model, tl, vl, opt, crit, dev, 1, ln, verbose=False, amp=True)
+        assert len(history["train_loss"]) == 1
+
+    def test_amp_auto_disabled_sophia(self, capsys):
+        """Sophia + amp=True: warning naming Sophia and create_graph printed; training completes."""
+        from optimizers import Sophia
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        tl, vl = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        opt = Sophia(model.parameters(), lr=1e-4)
+        crit = torch.nn.CrossEntropyLoss()
+        dev = torch.device("cpu")
+        ln = linear_layer_names(model)
+        history = run_training(model, tl, vl, opt, crit, dev, 1, ln, verbose=False, amp=True)
+        captured = capsys.readouterr()
+        assert "AMP auto-disabled" in captured.out
+        assert "Sophia" in captured.out
+        assert "create_graph" in captured.out
+        assert len(history["train_loss"]) == 1
+
+    def test_amp_auto_disabled_adahessian(self, capsys):
+        """AdaHessian + amp=True: warning naming AdaHessian and create_graph printed; training completes."""
+        from optimizers import AdaHessian
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        tl, vl = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        opt = AdaHessian(model.parameters(), lr=0.1)
+        crit = torch.nn.CrossEntropyLoss()
+        dev = torch.device("cpu")
+        ln = linear_layer_names(model)
+        history = run_training(model, tl, vl, opt, crit, dev, 1, ln, verbose=False, amp=True)
+        captured = capsys.readouterr()
+        assert "AMP auto-disabled" in captured.out
+        assert "AdaHessian" in captured.out
+        assert "create_graph" in captured.out
+        assert len(history["train_loss"]) == 1

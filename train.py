@@ -8,6 +8,7 @@ Custom optimizer  : add your class to optimizers/ and register it below.
 """
 
 import argparse
+import contextlib
 import os
 import random
 import shutil
@@ -37,6 +38,11 @@ from lr_finder import LRFinder
 import numpy as np
 
 from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
+
+# Optimizers that call loss.backward(create_graph=True) inside their own step()
+# to estimate Hessian-vector products.  GradScaler's loss scaling corrupts the
+# second-order gradient graph, so AMP must be disabled when these are in use.
+_AMP_INCOMPATIBLE = (Sophia, AdaHessian)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +431,8 @@ def train_one_epoch(
     model, loader, optimizer, criterion, device, layer_names,
     global_step_offset: int = 0,
     max_grad_norm: float | None = None,
+    amp: bool = False,
+    scaler=None,
 ) -> dict:
     """Run one training epoch.
 
@@ -450,19 +458,32 @@ def train_one_epoch(
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
-        logits = model(images)
-        loss = criterion(logits, labels)
+
+        amp_ctx = (
+            torch.autocast(device_type=device.type, dtype=torch.float16)
+            if amp else contextlib.nullcontext()
+        )
+        with amp_ctx:
+            logits = model(images)
+            loss = criterion(logits, labels)
+
         if getattr(optimizer, "requires_create_graph", False):
             # Use autograd.grad so gradients are differentiable graph nodes
             # (needed for HVP computation in second-order optimizers).
+            # AMP is always disabled upstream when this path is taken.
             trainable = [p for p in model.parameters() if p.requires_grad]
             grads = torch.autograd.grad(loss, trainable, create_graph=True)
             for p, g in zip(trainable, grads):
                 p.grad = g
+        elif scaler is not None:
+            # CUDA AMP: scaled backward, then unscale so gradient norms are
+            # in full precision before we read or clip them.
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
         else:
             loss.backward()
 
-        # Accumulate gradient norms per linear layer
+        # Accumulate gradient norms per linear layer (always full precision here)
         idx = 0
         for module in model.modules():
             if isinstance(module, nn.Linear):
@@ -489,7 +510,12 @@ def train_one_epoch(
         else:
             all_grad_norms.extend(param_grad_norms)
 
-        optimizer.step()
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+
         total_loss += loss.item() * images.size(0)
         correct += (logits.argmax(dim=1) == labels).sum().item()
         step_losses.append(loss.item())
@@ -543,6 +569,7 @@ def run_training(
     max_grad_norm: float | None = None,
     checkpoint_dir: str | None = None,
     checkpoint_config: dict | None = None,
+    amp: bool = False,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -565,6 +592,30 @@ def run_training(
         learning_rates             : list[float]  — LR at start of each epoch
     """
     from metrics import compute_hessian_trace, compute_sharpness
+
+    # ── AMP setup ──────────────────────────────────────────────────────────
+    scaler = None
+    if amp:
+        if isinstance(optimizer, _AMP_INCOMPATIBLE):
+            print(
+                f"\n  ⚠  AMP auto-disabled: {type(optimizer).__name__} computes "
+                f"Hessian-vector products via loss.backward(create_graph=True). "
+                f"GradScaler's loss scaling corrupts the second-order gradient "
+                f"graph, producing incorrect curvature estimates. "
+                f"Falling back to full precision (float32)."
+            )
+            amp = False
+        elif device.type == "cuda":
+            scaler = torch.cuda.amp.GradScaler()
+        elif device.type == "mps":
+            pass  # autocast only — GradScaler is CUDA-specific
+        else:
+            print(
+                "\n  ⚠  AMP not enabled: device is CPU. "
+                "float16 autocast provides no speed benefit on CPU. "
+                "Training in float32."
+            )
+            amp = False
 
     history: dict = {
         "train_loss": [], "test_loss": [],
@@ -609,6 +660,8 @@ def run_training(
             model, train_loader, optimizer, criterion, device, layer_names,
             global_step_offset=global_step_offset,
             max_grad_norm=max_grad_norm,
+            amp=amp,
+            scaler=scaler,
         )
         global_step_offset += len(epoch_result["step_losses"])
 
@@ -739,6 +792,12 @@ def parse_args():
                    help="Mini-batch steps for the LR range test (default: 100)")
     p.add_argument("--find-lr-plot",  default=None,
                    help="Save path for LR range test plot (default: no plot)")
+    p.add_argument("--amp", action="store_true",
+                   help="Enable automatic mixed precision: float16 autocast + GradScaler "
+                        "on CUDA (~30%% faster, half memory); float16 autocast only on MPS; "
+                        "no-op on CPU. Auto-disabled for Sophia and AdaHessian (their "
+                        "Hessian estimators call backward(create_graph=True), which is "
+                        "incompatible with GradScaler loss scaling).")
     return p.parse_args()
 
 
@@ -786,6 +845,27 @@ def main():
         print(f"Seed          : {args.seed}")
     if args.checkpoint_dir:
         print(f"Checkpoints   : {args.checkpoint_dir}/")
+
+    # AMP setup
+    amp = args.amp
+    scaler = None
+    if amp:
+        if isinstance(optimizer, _AMP_INCOMPATIBLE):
+            print(
+                f"  AMP        : disabled ⚠  {optimizer.__class__.__name__} uses "
+                f"backward(create_graph=True) to estimate the Hessian — "
+                f"GradScaler loss scaling corrupts the second-order gradient graph. "
+                f"Training in float32."
+            )
+            amp = False
+        elif device.type == "cuda":
+            scaler = torch.cuda.amp.GradScaler()
+            print(f"  AMP        : enabled  (CUDA — float16 autocast + GradScaler)")
+        elif device.type == "mps":
+            print(f"  AMP        : enabled  (MPS — float16 autocast, no GradScaler)")
+        else:
+            print(f"  AMP        : disabled (CPU — float16 provides no speed benefit)")
+            amp = False
     print()
 
     if args.find_lr:
@@ -841,6 +921,8 @@ def main():
         epoch_result = train_one_epoch(
             model, train_loader, optimizer, criterion, device, layer_names,
             max_grad_norm=args.max_grad_norm,
+            amp=amp,
+            scaler=scaler,
         )
         train_loss = epoch_result["loss"]
         train_acc  = epoch_result["acc"]

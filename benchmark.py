@@ -318,6 +318,7 @@ def run_benchmark(
     checkpoint_dir: str | None = None,
     num_seeds: int = 1,
     target_acc: float = 0.95,
+    amp: bool = False,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -407,6 +408,7 @@ def run_benchmark(
                                 target_acc=target_acc,
                                 checkpoint_dir=run_ckpt_dir,
                                 checkpoint_config=run_cfg,
+                                amp=amp,
                             )
                             seed_histories.append(history)
 
@@ -473,6 +475,10 @@ def parse_args():
                    help="Seeds to average over per run (default: 1 = single run)")
     p.add_argument("--target-acc", default=0.95, type=float,
                    help="Accuracy threshold for convergence speed columns in report (default: 0.95)")
+    p.add_argument("--amp", action="store_true",
+                   help="Enable automatic mixed precision: float16 autocast + GradScaler "
+                        "on CUDA; float16 autocast only on MPS; no-op on CPU. "
+                        "Auto-disabled for Sophia and AdaHessian (incompatible with GradScaler).")
     p.add_argument("--save-lr-plot", default="plots/lr_sensitivity.png",
                    help="Path to save LR sensitivity figure ('' to disable; "
                         "only generated when --lrs has ≥2 values)")
@@ -489,6 +495,8 @@ def main():
     if args.num_seeds > 1:
         base_seed = args.seed if args.seed is not None else 0
         print(f"  Seed averaging : {args.num_seeds} seeds (base {base_seed})")
+    if args.amp:
+        print(f"  AMP            : enabled (auto-disabled per-run for Sophia/AdaHessian)")
     if args.lrs is not None and len(args.lrs) == 1:
         print(f"  LR (global)  : {args.lrs[0]}")
     elif args.lrs is not None:
@@ -549,6 +557,7 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         num_seeds=args.num_seeds,
         target_acc=args.target_acc,
+        amp=args.amp,
     )
     logger.close()
 
