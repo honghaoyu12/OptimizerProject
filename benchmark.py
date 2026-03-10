@@ -319,6 +319,7 @@ def run_benchmark(
     num_seeds: int = 1,
     target_acc: float = 0.95,
     amp: bool = False,
+    compile_model: bool = False,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -332,6 +333,9 @@ def run_benchmark(
     """
     if weight_decays is None:
         weight_decays = [0.0]
+
+    # Optimizers incompatible with torch.compile (create_graph=True in step())
+    _COMPILE_INCOMPATIBLE_NAMES = {"sophia", "adahessian"}
 
     results: dict = {}
     criterion = nn.CrossEntropyLoss()
@@ -373,12 +377,29 @@ def run_benchmark(
                         print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {series_name}  (lr={lr})")
                         print(f"{'═' * 60}")
 
+                        # Warn once per (opt, lr, wd) if compile is incompatible
+                        if compile_model and opt_name.lower() in _COMPILE_INCOMPATIBLE_NAMES:
+                            print(
+                                f"\n  ⚠  torch.compile disabled for {opt_name}: "
+                                f"this optimizer uses backward(create_graph=True) to "
+                                f"estimate Hessian-vector products. torch.compile's "
+                                f"static graph tracing cannot capture dynamic higher-order "
+                                f"graphs correctly. Running {opt_name} in eager mode."
+                            )
+
                         base_seed = seed if seed is not None else 0
                         seed_histories: list[dict] = []
                         for seed_idx in range(num_seeds):
                             if num_seeds > 1 or seed is not None:
                                 set_seed(base_seed + seed_idx)
                             model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
+                            if compile_model and opt_name.lower() not in _COMPILE_INCOMPATIBLE_NAMES:
+                                try:
+                                    model = torch.compile(model)
+                                except Exception as e:
+                                    if seed_idx == 0:
+                                        print(f"\n  ⚠  torch.compile failed: {e}. "
+                                              f"Running {opt_name} in eager mode.")
                             if wd > 0.0:
                                 params = make_param_groups(model, wd)
                                 optimizer = opt_info["factory"](params, lr, 0.0)
@@ -479,6 +500,10 @@ def parse_args():
                    help="Enable automatic mixed precision: float16 autocast + GradScaler "
                         "on CUDA; float16 autocast only on MPS; no-op on CPU. "
                         "Auto-disabled for Sophia and AdaHessian (incompatible with GradScaler).")
+    p.add_argument("--compile", action="store_true",
+                   help="Apply torch.compile() to each model before training. Auto-disabled "
+                        "per-run for Sophia and AdaHessian (create_graph=True incompatible "
+                        "with static graph tracing). Falls back to eager if compilation fails.")
     p.add_argument("--save-lr-plot", default="plots/lr_sensitivity.png",
                    help="Path to save LR sensitivity figure ('' to disable; "
                         "only generated when --lrs has ≥2 values)")
@@ -497,6 +522,8 @@ def main():
         print(f"  Seed averaging : {args.num_seeds} seeds (base {base_seed})")
     if args.amp:
         print(f"  AMP            : enabled (auto-disabled per-run for Sophia/AdaHessian)")
+    if args.compile:
+        print(f"  torch.compile  : enabled (auto-disabled per-run for Sophia/AdaHessian)")
     if args.lrs is not None and len(args.lrs) == 1:
         print(f"  LR (global)  : {args.lrs[0]}")
     elif args.lrs is not None:
@@ -558,6 +585,7 @@ def main():
         num_seeds=args.num_seeds,
         target_acc=args.target_acc,
         amp=args.amp,
+        compile_model=args.compile,
     )
     logger.close()
 

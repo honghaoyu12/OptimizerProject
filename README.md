@@ -190,6 +190,11 @@ python train.py --model vit --dataset cifar10 --optimizer adamw --epochs 15 \
 --amp            enable automatic mixed precision (float16 autocast + GradScaler on CUDA;
                  float16 autocast only on MPS; no-op on CPU; auto-disabled for
                  Sophia and AdaHessian — see caveats below)
+--compile        apply torch.compile() to the model for ~20-40% speedup via kernel fusion
+                 (CUDA/MPS); auto-disabled for Sophia and AdaHessian (create_graph=True
+                 incompatible with static graph tracing); falls back to eager on failure
+--resume PATH    resume training from a .pt checkpoint (restores model weights and optimizer
+                 state; continues from the next epoch)
 ```
 
 ### 4. Run the interactive benchmark
@@ -275,6 +280,8 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --target-acc     accuracy threshold for convergence-speed columns in report  (default: 0.95)
 --amp            enable automatic mixed precision — same behaviour as train.py (auto-disabled
                  per-run for Sophia and AdaHessian with an explanatory message)
+--compile        apply torch.compile() to each model for kernel-fusion speedup; auto-disabled
+                 per-run for Sophia and AdaHessian (create_graph=True incompatible)
 --save-lr-plot   path for LR sensitivity figure (default: plots/lr_sensitivity.png; only generated when --lrs has ≥2 values)
 --checkpoint-dir directory for per-run checkpoints
 --report-path    save path for the Markdown benchmark report (default: reports/benchmark_report.md)
@@ -313,7 +320,31 @@ python train.py --device mps     # Apple Silicon
 
 - **GradScaler occasionally skips a step** when it detects float16 overflow (it reduces the scale factor instead). This is normal AMP behaviour and self-corrects within a few steps.
 
-### 7. If the live plot window freezes
+### 7. `torch.compile` (`--compile`)
+
+`--compile` calls `torch.compile(model)` before training, enabling PyTorch 2.x's kernel fusion and graph optimization. Expected speedup is ~20–40% on CUDA or MPS; there is no benefit on CPU.
+
+**Incompatible optimizers:** Sophia and AdaHessian call `loss.backward(create_graph=True)` to compute Hessian-vector products. `torch.compile` traces the computation graph statically and cannot capture dynamic higher-order graphs. When `--compile` is set and either optimizer is in use, compilation is automatically skipped for that run with an explanatory message; other optimizers in the same benchmark still receive compiled models.
+
+If `torch.compile` fails for any other reason (e.g. unsupported ops or platform restrictions), training falls back to eager mode with a warning — no crash.
+
+### 8. Resume from checkpoint (`--resume`)
+
+`--resume PATH` loads a `.pt` checkpoint saved by a previous run and continues training from where it left off:
+
+```bash
+# Train for 5 epochs, saving checkpoints automatically
+python train.py --epochs 5 --checkpoint-dir ckpts/
+
+# Resume and train for 5 more epochs (epochs 6–10)
+python train.py --epochs 10 --resume ckpts/best.pt
+```
+
+The checkpoint contains `epoch`, `model_state_dict`, `optimizer_state_dict`, `metrics`, and `config`. On resume, model weights and optimizer state (momentum buffers, adaptive learning rates, etc.) are restored before training continues. If the checkpoint epoch is already ≥ `--epochs`, training exits immediately with a message.
+
+`run_training()` also accepts `resume_from=PATH` for programmatic use in notebooks or custom scripts.
+
+### 9. If the live plot window freezes
 
 Some systems don't support interactive matplotlib windows well. Use `--no-plot` to skip it and save to a file instead:
 

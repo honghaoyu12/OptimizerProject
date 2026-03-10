@@ -556,6 +556,27 @@ Total tests: 303 (up from 299). CI green on `main`.
 
 ---
 
+## Session 28 — `torch.compile` and Resume from Checkpoint
+
+**What we discussed:**
+- `torch.compile` provides ~20–40% free speedup via kernel fusion; worth adding as an opt-in flag
+- Sophia and AdaHessian are incompatible with `torch.compile` (same `create_graph=True` reason as AMP)
+- Resume from checkpoint is essential for long runs — allows continuing after interruption without losing progress
+- Decision: per-optimizer incompatibility check with an explanatory message (not silent); try/except fallback
+
+**What was built:**
+- `train.py`:
+  - `_COMPILE_INCOMPATIBLE = (Sophia, AdaHessian)` — module-level constant
+  - `--compile` CLI flag; `main()` applies `torch.compile(model)` or prints named incompatibility message; try/except fallback to eager
+  - `run_training`: `resume_from: str | None = None` param; loads checkpoint at start of training (`weights_only=False` for PyTorch 2.x); epoch loop changed to `range(start_epoch, epochs+1)`
+  - `--resume PATH` CLI flag; same logic in `main()`'s own epoch loop; exits early if checkpoint epoch ≥ `--epochs`
+- `benchmark.py`: `compile_model=False` param in `run_benchmark`; per-optimizer incompatibility check via `_COMPILE_INCOMPATIBLE_NAMES = {"sophia", "adahessian"}`; compile inside seed loop with try/except; `--compile` flag; startup banner; `compile_model=args.compile` wired into `main()` call
+- `tests/test_train.py`: 5 new tests — `TestCompile` (3: compiled model trains, sentinel membership, Sophia warning text) + `TestResume` (2: epoch count after resume, no-crash on zero-weight checkpoint)
+
+Total tests: 308 (up from 303). CI green on `main`.
+
+---
+
 ## Current State
 
 | Component | Status |
@@ -573,9 +594,11 @@ Total tests: 303 (up from 299). CI green on `main`.
 | Convergence speed | `--target-acc` in `benchmark.py` — "Epochs to N%" / "Time to N%" columns in report; axvline marker in plot |
 | LR sensitivity plot | `plot_lr_sensitivity()` in `visualizer.py` — acc vs log-LR, auto-generated when `--lrs` has ≥2 values |
 | Mixed precision | `--amp` in both CLIs — float16 autocast+GradScaler on CUDA; autocast only on MPS; auto-disabled for Sophia/AdaHessian |
+| torch.compile | `--compile` in both CLIs — static graph tracing speedup; auto-disabled for Sophia/AdaHessian; try/except fallback |
+| Resume from checkpoint | `--resume PATH` in `train.py`; `resume_from=PATH` in `run_training()` — restores model+optimizer state |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 303 passing |
+| Tests | 308 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

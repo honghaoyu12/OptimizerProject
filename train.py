@@ -44,6 +44,11 @@ from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, 
 # second-order gradient graph, so AMP must be disabled when these are in use.
 _AMP_INCOMPATIBLE = (Sophia, AdaHessian)
 
+# torch.compile traces the computation graph statically.  Optimizers that call
+# backward(create_graph=True) build a dynamic higher-order graph that the
+# compiler cannot capture correctly, leading to incorrect gradients or crashes.
+_COMPILE_INCOMPATIBLE = (Sophia, AdaHessian)
+
 
 # ---------------------------------------------------------------------------
 # Reproducibility
@@ -570,6 +575,7 @@ def run_training(
     checkpoint_dir: str | None = None,
     checkpoint_config: dict | None = None,
     amp: bool = False,
+    resume_from: str | None = None,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -641,6 +647,17 @@ def run_training(
     if checkpoint_dir:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # Resume from checkpoint
+    start_epoch = 1
+    if resume_from:
+        ckpt = torch.load(resume_from, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        if verbose:
+            print(f"\n  Resumed from {resume_from} (epoch {ckpt['epoch']}). "
+                  f"Continuing from epoch {start_epoch}.")
+
     # Fixed batch for Hessian/sharpness (reuse same batch each epoch)
     hessian_batch = None
     if compute_hessian:
@@ -652,7 +669,7 @@ def run_training(
     start_time = time.time()
     global_step_offset = 0
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         # Record LR before this epoch's training
         history["learning_rates"].append(optimizer.param_groups[0]["lr"])
 
@@ -798,6 +815,15 @@ def parse_args():
                         "no-op on CPU. Auto-disabled for Sophia and AdaHessian (their "
                         "Hessian estimators call backward(create_graph=True), which is "
                         "incompatible with GradScaler loss scaling).")
+    p.add_argument("--compile", action="store_true",
+                   help="Apply torch.compile() to the model before training for additional "
+                        "speed (~20-40%% on CUDA/MPS via kernel fusion). Auto-disabled for "
+                        "Sophia and AdaHessian (create_graph=True is incompatible with "
+                        "static graph tracing). Falls back to eager if compilation fails.")
+    p.add_argument("--resume", default=None,
+                   help="Path to a checkpoint (.pt) to resume training from. "
+                        "Restores model weights, optimizer state, and continues from the "
+                        "next epoch.")
     return p.parse_args()
 
 
@@ -845,6 +871,22 @@ def main():
         print(f"Seed          : {args.seed}")
     if args.checkpoint_dir:
         print(f"Checkpoints   : {args.checkpoint_dir}/")
+
+    # torch.compile
+    if args.compile:
+        if isinstance(optimizer, _COMPILE_INCOMPATIBLE):
+            print(
+                f"  compile    : disabled ⚠  {optimizer.__class__.__name__} uses "
+                f"backward(create_graph=True) to estimate the Hessian — "
+                f"torch.compile's static graph tracing cannot capture dynamic "
+                f"higher-order graphs correctly. Running in eager mode."
+            )
+        else:
+            try:
+                model = torch.compile(model)
+                print(f"  compile    : enabled  (torch.compile)")
+            except Exception as e:
+                print(f"  compile    : failed ({e}) — running in eager mode")
 
     # AMP setup
     amp = args.amp
@@ -914,7 +956,21 @@ def main():
     }
     run_start = time.time()
 
-    for epoch in range(1, args.epochs + 1):
+    # Resume from checkpoint
+    start_epoch = 1
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        print(f"\n  Resumed from {args.resume} (epoch {ckpt['epoch']}). "
+              f"Continuing from epoch {start_epoch}.")
+        if start_epoch > args.epochs:
+            print(f"  Nothing to do: checkpoint epoch {ckpt['epoch']} >= "
+                  f"--epochs {args.epochs}. Exiting.")
+            return
+
+    for epoch in range(start_epoch, args.epochs + 1):
         current_lr = optimizer.param_groups[0]["lr"]
         history["learning_rates"].append(current_lr)
 

@@ -4,6 +4,35 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 24 — `torch.compile` and Resume from Checkpoint
+
+### `train.py`
+
+- **`_COMPILE_INCOMPATIBLE = (Sophia, AdaHessian)`** — module-level constant naming optimizers that call `loss.backward(create_graph=True)`. `torch.compile`'s static graph tracing cannot capture dynamic higher-order graphs, so compilation is auto-disabled for these with an explanatory message.
+- **`--compile` flag** — applies `torch.compile(model)` before training for ~20–40% kernel-fusion speedup on CUDA/MPS. Auto-disabled for Sophia and AdaHessian (with message naming the optimizer and the `create_graph` reason). Falls back to eager on compilation failure.
+- **`run_training`** — new `resume_from: str | None = None` parameter. When provided, loads `model_state_dict` and `optimizer_state_dict` from a `.pt` checkpoint, sets `start_epoch = ckpt["epoch"] + 1`, and continues training from there. Epoch loop changed from `range(1, epochs+1)` to `range(start_epoch, epochs+1)`.
+- **`--resume` flag** — path to a `.pt` checkpoint; same logic as `run_training(resume_from=...)` but applied in `main()`'s own epoch loop. Prints resume banner and exits early if `start_epoch > epochs`.
+
+### `benchmark.py`
+
+- **`run_benchmark`** — new `compile_model: bool = False` parameter. Per-optimizer compile decision made at the `opt_name` level using `_COMPILE_INCOMPATIBLE_NAMES = {"sophia", "adahessian"}`. Incompatible optimizers receive a warning; all others have `torch.compile` applied inside the seed loop with try/except fallback.
+- **`--compile` flag** and startup banner.
+
+### `tests/test_train.py`
+
+Three new tests (`TestCompile`):
+- `test_compiled_model_trains_normally` — a `torch.compile`d model produces a valid 1-epoch history.
+- `test_compile_incompatible_tuple_contains_sophia_adahessian` — verifies both Sophia and AdaHessian are in `_COMPILE_INCOMPATIBLE`.
+- `test_compile_incompatible_warning_sophia` — simulates the `isinstance` guard and asserts the message contains `"Sophia"`, `"create_graph"`, and `"eager"`.
+
+Two new tests (`TestResume`):
+- `test_resume_continues_from_checkpoint` — saves an epoch-1 checkpoint, resumes into `epochs=2`; history has 1 entry (only epoch 2 ran).
+- `test_resume_loads_model_weights` — checkpoint saves zero weights; resumed model loads them without error.
+
+Total tests: 308 (up from 303).
+
+---
+
 ## Round 23 — Mixed Precision Training (`--amp`)
 
 ### `train.py`
