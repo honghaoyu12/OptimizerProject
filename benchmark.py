@@ -9,7 +9,7 @@ triple is trained in sequence and the results are plotted together for
 easy comparison.
 
 Optional CLI flags let you set shared hyperparameters without re-running:
-    --epochs, --batch-size, --hidden-sizes, --lr, --device, --save-plot
+    --epochs, --batch-size, --hidden-sizes, --lrs, --device, --save-plot
 """
 
 import argparse
@@ -22,7 +22,9 @@ import torch.nn as nn
 from logger import TrainingLogger
 from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian
-from train import DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders, linear_layer_names, run_training, save_checkpoint, set_seed
+from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
+                   linear_layer_names, make_param_groups, run_training,
+                   save_checkpoint, set_seed)
 from visualizer import plot_benchmark
 
 
@@ -207,7 +209,7 @@ def run_benchmark(
     batch_size: int,
     data_dir: str,
     device: torch.device,
-    lr_override: float | None,
+    lrs: list[float] | None,
     logger: TrainingLogger | None = None,
     scheduler_name: str = "none",
     warmup_epochs: int = 5,
@@ -229,8 +231,11 @@ def run_benchmark(
 
     results: dict = {}
     criterion = nn.CrossEntropyLoss()
+    sweep_lr = lrs is not None and len(lrs) > 1
     sweep_wd = len(weight_decays) > 1
-    total_runs = len(dataset_names) * len(model_names) * len(optimizer_names) * len(weight_decays)
+    n_lr_vals = len(lrs) if lrs is not None else 1
+    total_runs = (len(dataset_names) * len(model_names)
+                  * len(optimizer_names) * n_lr_vals * len(weight_decays))
     run_idx = 0
 
     for ds_name in dataset_names:
@@ -242,66 +247,69 @@ def run_benchmark(
         for mdl_name in model_names:
             if ds_info.get("tabular") and mdl_name != "MLP":
                 print(f"\n  Skipping {mdl_name} for tabular dataset '{ds_name}' (MLP only).")
-                run_idx += len(optimizer_names) * len(weight_decays)
+                run_idx += len(optimizer_names) * n_lr_vals * len(weight_decays)
                 continue
             mdl_info = MODEL_REGISTRY[mdl_name]
 
             for opt_name in optimizer_names:
                 opt_info = OPTIMIZER_REGISTRY[opt_name]
-                lr = lr_override if lr_override is not None else opt_info["default_lr"]
+                lr_list = lrs if lrs is not None else [opt_info["default_lr"]]
 
-                for wd in weight_decays:
-                    run_idx += 1
-                    series_name = f"{opt_name} (wd={wd:g})" if sweep_wd else opt_name
+                for lr in lr_list:
+                    for wd in weight_decays:
+                        run_idx += 1
+                        suffixes = []
+                        if sweep_lr:
+                            suffixes.append(f"lr={lr:g}")
+                        if sweep_wd:
+                            suffixes.append(f"wd={wd:g}")
+                        series_name = f"{opt_name} ({', '.join(suffixes)})" if suffixes else opt_name
 
-                    print(f"\n{'═' * 60}")
-                    print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {series_name}  (lr={lr})")
-                    print(f"{'═' * 60}")
+                        print(f"\n{'═' * 60}")
+                        print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {series_name}  (lr={lr})")
+                        print(f"{'═' * 60}")
 
-                    model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
-                    optimizer = opt_info["factory"](model.parameters(), lr, wd)
-                    layer_names = linear_layer_names(model)
-                    scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
+                        model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
+                        if wd > 0.0:
+                            params = make_param_groups(model, wd)
+                            optimizer = opt_info["factory"](params, lr, 0.0)
+                        else:
+                            optimizer = opt_info["factory"](model.parameters(), lr, 0.0)
+                        layer_names = linear_layer_names(model)
+                        scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
 
-                    run_ckpt_dir = None
-                    if checkpoint_dir:
-                        run_ckpt_dir = os.path.join(
-                            checkpoint_dir,
-                            f"{ds_key}_{mdl_name.lower()}_{opt_name.lower().replace('+', '_')}",
-                        )
-                    run_cfg = {
-                        "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
-                        "lr": lr, "epochs": epochs, "weight_decay": wd,
-                    }
-                    history = run_training(
-                        model, train_loader, test_loader,
-                        optimizer, criterion, device,
-                        epochs, layer_names, verbose=True,
-                        scheduler=scheduler,
-                        patience=patience,
-                        min_delta=min_delta,
-                        max_grad_norm=max_grad_norm,
-                        checkpoint_dir=run_ckpt_dir,
-                        checkpoint_config=run_cfg,
-                    )
-                    results[(ds_name, mdl_name, series_name)] = history
-
-                    if logger is not None:
-                        config = {
-                            "dataset":       ds_key,
-                            "model":         mdl_name,
-                            "optimizer":     opt_name,
-                            "lr":            lr,
-                            "epochs":        epochs,
-                            "batch_size":    batch_size,
-                            "scheduler":     scheduler_name,
-                            "patience":      patience,
-                            "min_delta":     min_delta,
-                            "max_grad_norm": max_grad_norm,
-                            "weight_decay":  wd,
-                            "seed":          seed,
+                        run_ckpt_dir = None
+                        if checkpoint_dir:
+                            run_ckpt_dir = os.path.join(
+                                checkpoint_dir,
+                                f"{ds_key}_{mdl_name.lower()}_{opt_name.lower().replace('+', '_')}",
+                            )
+                        run_cfg = {
+                            "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
+                            "lr": lr, "epochs": epochs, "weight_decay": wd,
                         }
-                        logger.log_run(config, history)
+                        history = run_training(
+                            model, train_loader, test_loader,
+                            optimizer, criterion, device,
+                            epochs, layer_names, verbose=True,
+                            scheduler=scheduler,
+                            patience=patience,
+                            min_delta=min_delta,
+                            max_grad_norm=max_grad_norm,
+                            checkpoint_dir=run_ckpt_dir,
+                            checkpoint_config=run_cfg,
+                        )
+                        results[(ds_name, mdl_name, series_name)] = history
+
+                        if logger is not None:
+                            config = {
+                                "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
+                                "lr": lr, "epochs": epochs, "batch_size": batch_size,
+                                "scheduler": scheduler_name, "patience": patience,
+                                "min_delta": min_delta, "max_grad_norm": max_grad_norm,
+                                "weight_decay": wd, "seed": seed,
+                            }
+                            logger.log_run(config, history)
 
     return results
 
@@ -317,8 +325,9 @@ def parse_args():
     p.add_argument("--batch-size",   default=128,        type=int)
     p.add_argument("--hidden-sizes", default=[256, 128], type=int, nargs="+", metavar="N",
                    help="Hidden layer widths for MLP, e.g. --hidden-sizes 256 128")
-    p.add_argument("--lr",           default=None,       type=float,
-                   help="Override all optimizer default LRs (omit to use per-optimizer defaults)")
+    p.add_argument("--lrs",          default=None,       type=float, nargs="+", metavar="LR",
+                   help="LR values to sweep (omit = per-optimizer defaults; "
+                        "one value = global override; multiple = LR sweep)")
     p.add_argument("--data-dir",     default="./data")
     p.add_argument("--device",       default="auto",     help="cpu | cuda | mps | auto")
     p.add_argument("--save-plot",    default="plots/benchmark.png",
@@ -355,8 +364,10 @@ def main():
 
     print(f"\n  Device       : {device}")
     print(f"  Epochs       : {args.epochs}")
-    if args.lr is not None:
-        print(f"  LR (global)  : {args.lr}")
+    if args.lrs is not None and len(args.lrs) == 1:
+        print(f"  LR (global)  : {args.lrs[0]}")
+    elif args.lrs is not None:
+        print(f"  LR sweep     : {args.lrs}")
     else:
         print(f"  LR           : per-optimizer defaults")
 
@@ -371,13 +382,20 @@ def main():
     print(f"  Selected optimizers : {', '.join(optimizer_names)}")
 
     # ── Determine series names and colors ─────────────────────────────────
+    sweep_lr = args.lrs is not None and len(args.lrs) > 1
     sweep_wd = len(args.weight_decays) > 1
-    if sweep_wd:
-        series_names = [
-            f"{opt} (wd={wd:g})"
-            for opt in optimizer_names
-            for wd in args.weight_decays
-        ]
+    if sweep_lr or sweep_wd:
+        lr_vals = args.lrs if args.lrs is not None else [None]  # None = per-optimizer default
+        series_names = []
+        for opt in optimizer_names:
+            for lr in lr_vals:
+                for wd in args.weight_decays:
+                    suffixes = []
+                    if sweep_lr and lr is not None:
+                        suffixes.append(f"lr={lr:g}")
+                    if sweep_wd:
+                        suffixes.append(f"wd={wd:g}")
+                    series_names.append(f"{opt} ({', '.join(suffixes)})" if suffixes else opt)
         import matplotlib.pyplot as plt
         cmap = plt.get_cmap("tab20")
         opt_colors = {n: cmap(i % 20 / 20) for i, n in enumerate(series_names)}
@@ -394,7 +412,7 @@ def main():
         batch_size=args.batch_size,
         data_dir=args.data_dir,
         device=device,
-        lr_override=args.lr,
+        lrs=args.lrs,
         logger=logger,
         scheduler_name=args.scheduler,
         warmup_epochs=args.warmup_epochs,
