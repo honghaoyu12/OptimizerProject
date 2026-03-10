@@ -231,6 +231,72 @@ def get_device(preference: str) -> torch.device:
 # Benchmark runner
 # ---------------------------------------------------------------------------
 
+def _aggregate_histories(histories: list[dict]) -> dict:
+    """Aggregate N per-seed histories into mean ± std.
+
+    List-valued keys are stacked and reduced along the seed axis.
+    Scalar and special keys are handled individually.
+    """
+    import numpy as np
+
+    if not histories:
+        return {}
+
+    result: dict = {}
+
+    list_keys = [
+        "train_loss", "test_loss", "train_acc", "test_acc", "learning_rates",
+        "grad_norm_global", "grad_norm_before_clip", "grad_norm_std", "time_elapsed",
+    ]
+    for key in list_keys:
+        vals = [h.get(key) or [] for h in histories]
+        non_empty = [v for v in vals if v]
+        if not non_empty:
+            continue
+        min_len = min(len(v) for v in non_empty)
+        arr = np.array([v[:min_len] for v in non_empty], dtype=float)
+        result[key] = arr.mean(axis=0).tolist()
+        result[f"{key}_std"] = arr.std(axis=0).tolist()
+
+    for key in ("target_accuracy_epoch", "target_accuracy_time"):
+        vals = [h.get(key) for h in histories if h.get(key) is not None]
+        result[key] = float(np.mean(vals)) if vals else None
+
+    early_vals = [h.get("early_stopped_epoch") for h in histories
+                  if h.get("early_stopped_epoch") is not None]
+    result["early_stopped_epoch"] = round(float(np.mean(early_vals))) if early_vals else None
+
+    step_vals = [h.get("step_losses") or [] for h in histories]
+    non_empty = [v for v in step_vals if v]
+    if non_empty:
+        min_len = min(len(v) for v in non_empty)
+        arr = np.array([v[:min_len] for v in non_empty], dtype=float)
+        result["step_losses"] = arr.mean(axis=0).tolist()
+
+    for key in ("weight_norms", "grad_norms"):
+        dicts = [h.get(key, {}) for h in histories]
+        all_subkeys: set = set()
+        for d in dicts:
+            all_subkeys.update(d.keys())
+        merged: dict = {}
+        for subkey in all_subkeys:
+            sub_vals = [d.get(subkey) or [] for d in dicts]
+            non_empty_sub = [v for v in sub_vals if v]
+            if non_empty_sub:
+                min_len = min(len(v) for v in non_empty_sub)
+                arr = np.array([v[:min_len] for v in non_empty_sub], dtype=float)
+                merged[subkey] = arr.mean(axis=0).tolist()
+            else:
+                merged[subkey] = []
+        result[key] = merged
+
+    for key in histories[0]:
+        if key not in result:
+            result[key] = histories[0][key]
+
+    return result
+
+
 def run_benchmark(
     dataset_names: list[str],
     model_names: list[str],
@@ -250,8 +316,13 @@ def run_benchmark(
     weight_decays: list[float] | None = None,
     seed: int | None = None,
     checkpoint_dir: str | None = None,
+    num_seeds: int = 1,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
+
+    When ``num_seeds > 1`` each combination is trained ``num_seeds`` times
+    with consecutive seeds and the histories are aggregated via
+    :func:`_aggregate_histories` (mean ± std for list-valued keys).
 
     Returns
     -------
@@ -300,47 +371,58 @@ def run_benchmark(
                         print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {series_name}  (lr={lr})")
                         print(f"{'═' * 60}")
 
-                        model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
-                        if wd > 0.0:
-                            params = make_param_groups(model, wd)
-                            optimizer = opt_info["factory"](params, lr, 0.0)
-                        else:
-                            optimizer = opt_info["factory"](model.parameters(), lr, 0.0)
-                        layer_names = linear_layer_names(model)
-                        scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
+                        base_seed = seed if seed is not None else 0
+                        seed_histories: list[dict] = []
+                        for seed_idx in range(num_seeds):
+                            if num_seeds > 1 or seed is not None:
+                                set_seed(base_seed + seed_idx)
+                            model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
+                            if wd > 0.0:
+                                params = make_param_groups(model, wd)
+                                optimizer = opt_info["factory"](params, lr, 0.0)
+                            else:
+                                optimizer = opt_info["factory"](model.parameters(), lr, 0.0)
+                            layer_names = linear_layer_names(model)
+                            scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
 
-                        run_ckpt_dir = None
-                        if checkpoint_dir:
-                            run_ckpt_dir = os.path.join(
-                                checkpoint_dir,
-                                f"{ds_key}_{mdl_name.lower()}_{opt_name.lower().replace('+', '_')}",
-                            )
-                        run_cfg = {
-                            "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
-                            "lr": lr, "epochs": epochs, "weight_decay": wd,
-                        }
-                        history = run_training(
-                            model, train_loader, test_loader,
-                            optimizer, criterion, device,
-                            epochs, layer_names, verbose=True,
-                            scheduler=scheduler,
-                            patience=patience,
-                            min_delta=min_delta,
-                            max_grad_norm=max_grad_norm,
-                            checkpoint_dir=run_ckpt_dir,
-                            checkpoint_config=run_cfg,
-                        )
-                        results[(ds_name, mdl_name, series_name)] = history
-
-                        if logger is not None:
-                            config = {
+                            run_ckpt_dir = None
+                            if checkpoint_dir:
+                                run_ckpt_dir = os.path.join(
+                                    checkpoint_dir,
+                                    f"{ds_key}_{mdl_name.lower()}_{opt_name.lower().replace('+', '_')}",
+                                )
+                            run_cfg = {
                                 "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
-                                "lr": lr, "epochs": epochs, "batch_size": batch_size,
-                                "scheduler": scheduler_name, "patience": patience,
-                                "min_delta": min_delta, "max_grad_norm": max_grad_norm,
-                                "weight_decay": wd, "seed": seed,
+                                "lr": lr, "epochs": epochs, "weight_decay": wd,
                             }
-                            logger.log_run(config, history)
+                            history = run_training(
+                                model, train_loader, test_loader,
+                                optimizer, criterion, device,
+                                epochs, layer_names, verbose=True,
+                                scheduler=scheduler,
+                                patience=patience,
+                                min_delta=min_delta,
+                                max_grad_norm=max_grad_norm,
+                                checkpoint_dir=run_ckpt_dir,
+                                checkpoint_config=run_cfg,
+                            )
+                            seed_histories.append(history)
+
+                            if logger is not None:
+                                log_cfg = {
+                                    "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
+                                    "lr": lr, "epochs": epochs, "batch_size": batch_size,
+                                    "scheduler": scheduler_name, "patience": patience,
+                                    "min_delta": min_delta, "max_grad_norm": max_grad_norm,
+                                    "weight_decay": wd, "seed": base_seed + seed_idx,
+                                }
+                                logger.log_run(log_cfg, history)
+
+                        aggregated = (
+                            _aggregate_histories(seed_histories) if num_seeds > 1
+                            else seed_histories[0]
+                        )
+                        results[(ds_name, mdl_name, series_name)] = aggregated
 
     return results
 
@@ -384,19 +466,21 @@ def parse_args():
                    help="Save best.pt and final.pt under this directory per run (default: disabled)")
     p.add_argument("--report-path", default="reports/benchmark_report.md",
                    help="Save path for the Markdown benchmark report ('' to disable)")
+    p.add_argument("--num-seeds", default=1, type=int,
+                   help="Seeds to average over per run (default: 1 = single run)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
-    if args.seed is not None:
-        set_seed(args.seed)
-
     device = get_device(args.device)
 
     print(f"\n  Device       : {device}")
     print(f"  Epochs       : {args.epochs}")
+    if args.num_seeds > 1:
+        base_seed = args.seed if args.seed is not None else 0
+        print(f"  Seed averaging : {args.num_seeds} seeds (base {base_seed})")
     if args.lrs is not None and len(args.lrs) == 1:
         print(f"  LR (global)  : {args.lrs[0]}")
     elif args.lrs is not None:
@@ -455,6 +539,7 @@ def main():
         weight_decays=args.weight_decays,
         seed=args.seed,
         checkpoint_dir=args.checkpoint_dir,
+        num_seeds=args.num_seeds,
     )
     logger.close()
 
@@ -471,6 +556,7 @@ def main():
             "weight_decays": args.weight_decays,
             "lrs": args.lrs,
             "seed": args.seed,
+            "num_seeds": args.num_seeds,
         }
         generate_report(results, report_cfg, save_path=args.report_path)
         print(f"\n  Report saved to {args.report_path}")

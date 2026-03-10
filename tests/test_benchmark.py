@@ -91,3 +91,31 @@ def test_wd_only_sweep_no_lr_suffix():
     series_names = [key[2] for key in results]
     for name in series_names:
         assert "lr=" not in name
+
+
+def test_num_seeds_single_result_per_combo():
+    """num_seeds=2 still produces 1 entry per (ds, model, series) in results."""
+    results = _run(num_seeds=2, seed=0)
+    assert len(results) == 1
+
+
+def test_num_seeds_adds_std_keys():
+    """Aggregated history contains 'test_acc_std' and 'train_loss_std'."""
+    results = _run(num_seeds=2, seed=0)
+    hist = next(iter(results.values()))
+    assert "test_acc_std" in hist
+    assert "train_loss_std" in hist
+
+
+def test_num_seeds_one_no_std_keys():
+    """num_seeds=1 produces no aggregation '_std' keys (identical to current behaviour).
+
+    Note: ``grad_norm_std`` is a native per-epoch key from ``train_one_epoch``
+    (within-epoch per-batch gradient-norm std) and is therefore excluded from
+    the check.
+    """
+    results = _run(num_seeds=1)
+    hist = next(iter(results.values()))
+    # Exclude the pre-existing native grad_norm_std key
+    agg_std_keys = [k for k in hist if k.endswith("_std") and k != "grad_norm_std"]
+    assert agg_std_keys == []

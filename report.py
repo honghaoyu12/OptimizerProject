@@ -68,9 +68,11 @@ def generate_report(
     wds         = config.get("weight_decays", [0.0])
     lrs         = config.get("lrs", None)
     seed        = config.get("seed", None)
+    num_seeds   = config.get("num_seeds", 1)
 
-    wd_str  = ", ".join(str(w) for w in (wds or [0.0]))
-    lr_str  = ", ".join(str(l) for l in lrs) if lrs else "per-optimizer defaults"
+    wd_str   = ", ".join(str(w) for w in (wds or [0.0]))
+    lr_str   = ", ".join(str(l) for l in lrs) if lrs else "per-optimizer defaults"
+    seed_str = f"{num_seeds} (averaged)" if num_seeds > 1 else "1 (single run)"
 
     lines += [
         "## Setup",
@@ -86,6 +88,7 @@ def generate_report(
         f"| Weight decays | {wd_str} |",
         f"| LRs | {lr_str} |",
         f"| Seed | {seed} |",
+        f"| Seeds | {seed_str} |",
         "",
     ]
 
@@ -106,24 +109,33 @@ def generate_report(
         for (d, m, series), hist in results.items():
             if d != ds or m != mdl:
                 continue
-            test_acc   = hist.get("test_acc", [])
-            train_acc  = hist.get("train_acc", [])
-            train_loss = hist.get("train_loss", [])
-            elapsed    = hist.get("time_elapsed", [])
+            test_acc     = hist.get("test_acc", [])
+            test_acc_std = hist.get("test_acc_std", [])
+            train_acc    = hist.get("train_acc", [])
+            train_loss   = hist.get("train_loss", [])
+            elapsed      = hist.get("time_elapsed", [])
 
             final_acc  = test_acc[-1] * 100  if test_acc  else float("nan")
+            best_idx   = test_acc.index(max(test_acc)) if test_acc else 0
             best_acc   = max(test_acc) * 100  if test_acc  else float("nan")
             ep_run     = len(train_loss)
             total_time = elapsed[-1]           if elapsed   else float("nan")
             gap        = ((train_acc[-1] - test_acc[-1]) * 100
                           if train_acc and test_acc else float("nan"))
 
-            rows.append((series, final_acc, best_acc, ep_run, total_time, gap))
+            std_present = bool(test_acc_std)
+            final_std   = test_acc_std[-1] * 100   if std_present else None
+            best_std    = test_acc_std[best_idx] * 100 if std_present else None
+
+            final_str = f"{final_acc:.2f} ± {final_std:.2f}" if final_std is not None else f"{final_acc:.2f}"
+            best_str  = f"{best_acc:.2f} ± {best_std:.2f}"   if best_std  is not None else f"{best_acc:.2f}"
+
+            rows.append((series, final_acc, final_str, best_str, ep_run, total_time, gap))
 
         rows.sort(key=lambda r: r[1], reverse=True)
-        for series, final_acc, best_acc, ep_run, total_time, gap in rows:
+        for series, _, final_str, best_str, ep_run, total_time, gap in rows:
             lines.append(
-                f"| {series} | {final_acc:.2f} | {best_acc:.2f} | {ep_run} | {total_time:.1f} | {gap:.2f} |"
+                f"| {series} | {final_str} | {best_str} | {ep_run} | {total_time:.1f} | {gap:.2f} |"
             )
         lines.append("")
 
@@ -185,21 +197,30 @@ def generate_report(
         for (d, m, s), hist in sorted(results.items()):
             if s != series:
                 continue
-            test_acc  = hist.get("test_acc", [])
-            train_acc = hist.get("train_acc", [])
-            elapsed   = hist.get("time_elapsed", [])
-            train_loss = hist.get("train_loss", [])
+            test_acc     = hist.get("test_acc", [])
+            test_acc_std = hist.get("test_acc_std", [])
+            train_acc    = hist.get("train_acc", [])
+            elapsed      = hist.get("time_elapsed", [])
+            train_loss   = hist.get("train_loss", [])
 
-            final_acc = test_acc[-1] * 100  if test_acc   else float("nan")
-            best_acc  = max(test_acc) * 100  if test_acc   else float("nan")
-            ep_run    = len(train_loss)
+            final_acc  = test_acc[-1] * 100  if test_acc   else float("nan")
+            best_acc   = max(test_acc) * 100  if test_acc   else float("nan")
+            ep_run     = len(train_loss)
             total_time = elapsed[-1]          if elapsed    else float("nan")
-            gap       = ((train_acc[-1] - test_acc[-1]) * 100
-                         if train_acc and test_acc else float("nan"))
-            early_ep  = hist.get("early_stopped_epoch", None)
+            gap        = ((train_acc[-1] - test_acc[-1]) * 100
+                          if train_acc and test_acc else float("nan"))
+            early_ep   = hist.get("early_stopped_epoch", None)
+
+            std_present = bool(test_acc_std)
+            final_std   = test_acc_std[-1] * 100      if std_present else None
+            best_idx    = test_acc.index(max(test_acc)) if test_acc else 0
+            best_std    = test_acc_std[best_idx] * 100 if std_present else None
+
+            final_str = f"{final_acc:.1f} ± {final_std:.1f}" if final_std is not None else f"{final_acc:.1f}"
+            best_str  = f"{best_acc:.1f} ± {best_std:.1f}"   if best_std  is not None else f"{best_acc:.1f}"
 
             line = (
-                f"- **{d} / {m}**: {final_acc:.1f}% final, {best_acc:.1f}% peak "
+                f"- **{d} / {m}**: {final_str}% final, {best_str}% peak "
                 f"({ep_run} epochs, {total_time:.1f} s)"
             )
             if gap > 5.0:
@@ -266,6 +287,10 @@ def generate_report(
             gap_count += 1
     if gap_count:
         lines.append(f"- **Runs with train-test gap > 5%**: {gap_count}")
+
+    # Seed averaging
+    if num_seeds > 1:
+        lines.append(f"- **Seed averaging**: results averaged over {num_seeds} seeds")
 
     lines.append("")
 

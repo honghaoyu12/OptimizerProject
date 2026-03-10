@@ -325,10 +325,19 @@ def plot_benchmark(
                 if acc:
                     values = [v * 100 for v in values]
                 epochs = list(range(1, len(values) + 1))
+                color = opt_colors[opt_name]
                 ax.plot(epochs, values, "o-",
-                        color=opt_colors[opt_name],
+                        color=color,
                         label=opt_name,
                         linewidth=1.8, markersize=4)
+
+                std_vals = history.get(f"{key}_std", [])
+                if std_vals and len(std_vals) == len(values):
+                    if acc:
+                        std_vals = [v * 100 for v in std_vals]
+                    lo = [v - s for v, s in zip(values, std_vals)]
+                    hi = [v + s for v, s in zip(values, std_vals)]
+                    ax.fill_between(epochs, lo, hi, color=color, alpha=0.15)
 
             ax.legend(fontsize=7)
             ax.tick_params(labelsize=7)

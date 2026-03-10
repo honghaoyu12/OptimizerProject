@@ -110,3 +110,12 @@ def test_multiple_optimizers_rankings_present():
     out = generate_report(results, _DEFAULT_CONFIG, save_path="")
     assert "Best final accuracy" in out
     assert "Fastest" in out
+
+
+def test_report_shows_std_when_present():
+    """history with 'test_acc_std' key → '±' appears in the report output."""
+    results = _make_results()
+    key = next(iter(results))
+    results[key]["test_acc_std"] = [0.01, 0.01, 0.015]
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "±" in out
