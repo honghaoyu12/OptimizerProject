@@ -530,6 +530,32 @@ Total tests: 299 (up from 294). CI green on `main`.
 
 ---
 
+## Session 27 — Mixed Precision Training (`--amp`)
+
+**What we discussed:**
+- Training on CIFAR-100 / Tiny ImageNet is slow on CUDA/MPS; halving memory and getting ~30% speedup with one flag is practical
+- Key caveats to handle upfront: GradScaler is CUDA-only; MPS uses autocast without scaling; Sophia and AdaHessian call `backward(create_graph=True)` internally which is incompatible with GradScaler
+- Decision: auto-disable AMP for incompatible optimizers with a clear message naming the optimizer and the exact reason — don't silently corrupt results
+
+**What was built:**
+- `train.py`:
+  - `_AMP_INCOMPATIBLE = (Sophia, AdaHessian)` — module-level constant
+  - `train_one_epoch`: `amp` + `scaler` params; forward+loss in `torch.autocast`; `scaler.unscale_()` before gradient norm reads to preserve accuracy; three backward paths (create_graph / scaler / plain)
+  - `run_training`: `amp=False` param; AMP setup block (CUDA → autocast+GradScaler; MPS → autocast only; CPU → disabled; incompatible optimizer → disabled with message)
+  - `--amp` CLI flag; per-device banner in `main()`
+- `benchmark.py`: `amp` param in `run_benchmark`; `--amp` flag; startup banner
+- `tests/test_train.py`: 4 new tests (TestAMP) — disabled default, CPU no-op, Sophia auto-disable, AdaHessian auto-disable
+
+**Caveats fully documented in README:**
+- Sophia/AdaHessian auto-disabled (create_graph incompatibility explained)
+- Gradient norms always in full precision (scaler.unscale_ before reads)
+- eval() runs in float32 intentionally
+- GradScaler step-skipping on overflow is normal AMP behaviour
+
+Total tests: 303 (up from 299). CI green on `main`.
+
+---
+
 ## Current State
 
 | Component | Status |
@@ -546,9 +572,10 @@ Total tests: 299 (up from 294). CI green on `main`.
 | Multi-seed averaging | `--num-seeds` in `benchmark.py` — mean ± std histories; error bands in plot; ± in report |
 | Convergence speed | `--target-acc` in `benchmark.py` — "Epochs to N%" / "Time to N%" columns in report; axvline marker in plot |
 | LR sensitivity plot | `plot_lr_sensitivity()` in `visualizer.py` — acc vs log-LR, auto-generated when `--lrs` has ≥2 values |
+| Mixed precision | `--amp` in both CLIs — float16 autocast+GradScaler on CUDA; autocast only on MPS; auto-disabled for Sophia/AdaHessian |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 299 passing |
+| Tests | 303 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

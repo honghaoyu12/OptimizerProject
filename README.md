@@ -187,6 +187,9 @@ python train.py --model vit --dataset cifar10 --optimizer adamw --epochs 15 \
 --find-lr        run LR range test before training
 --find-lr-iters  mini-batch steps for the LR range test             (default: 100)
 --find-lr-plot   save path for the LR range test plot
+--amp            enable automatic mixed precision (float16 autocast + GradScaler on CUDA;
+                 float16 autocast only on MPS; no-op on CPU; auto-disabled for
+                 Sophia and AdaHessian — see caveats below)
 ```
 
 ### 4. Run the interactive benchmark
@@ -270,6 +273,8 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --seed           random seed for reproducibility
 --num-seeds      number of seeds to average over per run  (default: 1 = single run)
 --target-acc     accuracy threshold for convergence-speed columns in report  (default: 0.95)
+--amp            enable automatic mixed precision — same behaviour as train.py (auto-disabled
+                 per-run for Sophia and AdaHessian with an explanatory message)
 --save-lr-plot   path for LR sensitivity figure (default: plots/lr_sensitivity.png; only generated when --lrs has ≥2 values)
 --checkpoint-dir directory for per-run checkpoints
 --report-path    save path for the Markdown benchmark report (default: reports/benchmark_report.md)
@@ -288,7 +293,27 @@ python train.py --device cuda    # NVIDIA GPU
 python train.py --device mps     # Apple Silicon
 ```
 
-### 6. If the live plot window freezes
+### 6. Mixed precision training (`--amp`)
+
+`--amp` enables `torch.autocast` (float16) for the forward pass and loss computation, roughly halving GPU memory use and giving a ~30% speed boost on CUDA. Behaviour varies by device:
+
+| Device | What happens |
+|---|---|
+| **CUDA** | `torch.autocast("cuda", float16)` + `GradScaler` (handles float16 overflow via dynamic loss scaling) |
+| **MPS** (Apple Silicon) | `torch.autocast("mps", float16)` only — `GradScaler` is CUDA-specific and is not used |
+| **CPU** | Disabled with a message — float16 autocast provides no speed benefit on CPU |
+
+**Caveats and known incompatibilities:**
+
+- **Sophia and AdaHessian are automatically excluded from AMP.** Both optimizers call `loss.backward(create_graph=True)` inside their own `step()` to estimate Hessian-vector products. `GradScaler` scales the loss before backward, which corrupts the second-order gradient graph and produces incorrect curvature estimates. When `--amp` is set and either optimizer is in use, AMP is silently disabled *for that run* with an explanatory message; all other runs in the same benchmark proceed with AMP enabled.
+
+- **Gradient norm diagnostics remain accurate.** `scaler.unscale_(optimizer)` is called before reading or clipping gradient norms, so the displayed norms are always in full-precision scale.
+
+- **Evaluation (`evaluate()`) runs in float32.** Only the training forward pass is accelerated; eval accuracy is unaffected.
+
+- **GradScaler occasionally skips a step** when it detects float16 overflow (it reduces the scale factor instead). This is normal AMP behaviour and self-corrects within a few steps.
+
+### 7. If the live plot window freezes
 
 Some systems don't support interactive matplotlib windows well. Use `--no-plot` to skip it and save to a file instead:
 
@@ -372,7 +397,7 @@ pytest tests/test_optimizers.py::TestShampoo -v
 pytest tests/test_train.py::TestTrainingLoop::test_loss_decreases_over_epochs -v
 ```
 
-Expected output: `299 passed` in a few seconds (all on CPU, no downloads needed).
+Expected output: `303 passed` in a few seconds (all on CPU, no downloads needed).
 
 ### Test files
 
@@ -381,7 +406,7 @@ Expected output: `299 passed` in a few seconds (all on CPU, no downloads needed)
 | `tests/test_models.py` | 17 | MLP, ResNet18, ViT forward passes; output shapes; patch size assertion |
 | `tests/test_optimizers.py` | 55 | Registry completeness; finite weights after one step for all 20 optimizers; optimizer-specific state and behaviour |
 | `tests/test_metrics.py` | 9 | Hessian trace (type, finiteness, positivity, NaN on no-param model); sharpness (type, non-negativity, weight restoration, epsilon monotonicity) |
-| `tests/test_train.py` | 73 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers; early stopping; gradient clipping; weight decay (`make_param_groups`); seed reproducibility |
+| `tests/test_train.py` | 77 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers; early stopping; gradient clipping; weight decay (`make_param_groups`); seed reproducibility; AMP: disabled/CPU-noop/auto-disabled for Sophia+AdaHessian |
 | `tests/test_synthetic.py` | 52 | Registry completeness; loader shapes; label validity; NaN checks; standardisation; reproducibility; dataset-specific properties |
 | `tests/test_logger.py` | 30 | `TrainingLogger` session creation; `log_run` file format; `close` summary; edge cases |
 | `tests/test_checkpoints.py` | 5 | Checkpoint save and restore for best and final model states |

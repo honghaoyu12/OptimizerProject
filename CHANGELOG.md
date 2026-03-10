@@ -4,6 +4,46 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 23 — Mixed Precision Training (`--amp`)
+
+### `train.py`
+
+- **`_AMP_INCOMPATIBLE = (Sophia, AdaHessian)`** — module-level constant naming the two optimizers that call `loss.backward(create_graph=True)` inside their own `step()` to estimate Hessian-vector products. `GradScaler` loss scaling corrupts the second-order gradient graph, so AMP must be disabled for these.
+- **`train_one_epoch`** — new `amp: bool = False` and `scaler=None` parameters.
+  - Forward pass + loss computation wrapped in `torch.autocast(device_type, dtype=torch.float16)` when `amp=True`; `contextlib.nullcontext()` otherwise.
+  - Three backward paths: `requires_create_graph` → `torch.autograd.grad` (unchanged); `scaler is not None` → `scaler.scale(loss).backward()` then `scaler.unscale_(optimizer)` (so gradient norms are read in full precision); else → `loss.backward()`.
+  - `scaler.step(optimizer)` + `scaler.update()` replace `optimizer.step()` on CUDA.
+- **`run_training`** — new `amp: bool = False` parameter. AMP setup block before the epoch loop:
+  - `isinstance(optimizer, _AMP_INCOMPATIBLE)` → print detailed message naming the optimizer and the `create_graph=True` reason; set `amp=False`.
+  - CUDA → `torch.cuda.amp.GradScaler()` created once, reused across all epochs.
+  - MPS → `autocast` only; `GradScaler` is CUDA-specific.
+  - CPU → disabled with message (no speed benefit from float16 on CPU).
+- **`parse_args` / `main`** — `--amp` flag; per-device banner printed at startup; `scaler` passed to `train_one_epoch`.
+
+### `benchmark.py`
+
+- **`run_benchmark`** — new `amp: bool = False` parameter, forwarded to `run_training` for every seed. Per-run auto-disable messages come from `run_training` when Sophia/AdaHessian is encountered.
+- **`--amp` flag** and startup banner: `"AMP: enabled (auto-disabled per-run for Sophia/AdaHessian)"`.
+
+### `tests/test_train.py`
+
+Four new tests (`TestAMP`):
+- `test_amp_disabled_history_keys` — `amp=False` (default): all expected history keys present.
+- `test_amp_cpu_noop` — `amp=True` on CPU: disabled with message, training completes normally.
+- `test_amp_auto_disabled_sophia` — Sophia + `amp=True`: message contains `"AMP auto-disabled"`, `"Sophia"`, and `"create_graph"`; training completes.
+- `test_amp_auto_disabled_adahessian` — same for AdaHessian.
+
+### Caveats documented in README
+
+- Sophia and AdaHessian auto-disabled with explanatory message
+- `scaler.unscale_()` called before gradient norm reads/clips — norms always in full-precision scale
+- Evaluation (`evaluate()`) intentionally runs in float32
+- GradScaler may skip steps on overflow (self-correcting; normal AMP behaviour)
+
+Total tests: 303 (up from 299).
+
+---
+
 ## Round 22 — LR Sensitivity Plot (`plot_lr_sensitivity`)
 
 ### `visualizer.py`
