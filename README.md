@@ -15,6 +15,7 @@ OptimizerProject/
 ├── train.py              # Training loop, data loading, CLI entry point
 ├── visualizer.py         # Live dashboard and benchmark comparison plots
 ├── benchmark.py          # Interactive multi-(dataset × model × optimizer) benchmark
+├── report.py             # Markdown benchmark report generator
 ├── lr_finder.py          # LR range test (Leslie Smith, 2018)
 ├── logger.py             # Structured training logger (timestamped session folders)
 ├── synthetic_datasets.py # Five synthetic tabular datasets for optimizer stress-testing
@@ -45,7 +46,8 @@ OptimizerProject/
 │   ├── test_checkpoints.py   # 5 tests for checkpoint save/restore
 │   ├── test_plot_from_logs.py# 9 tests for log-replay plotting
 │   ├── test_lr_finder.py     # 7 tests for LRFinder
-│   └── test_benchmark.py     # 6 tests for benchmark.py LR sweep logic
+│   ├── test_benchmark.py     # 6 tests for benchmark.py LR sweep logic
+│   └── test_report.py        # 10 tests for report.py Markdown generation
 ├── .github/
 │   └── workflows/
 │       └── ci.yml        # GitHub Actions CI — runs all tests on push/PR
@@ -267,6 +269,7 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --weight-decays  one or more weight decay values (sweep)     (default: 0.0)
 --seed           random seed for reproducibility
 --checkpoint-dir directory for per-run checkpoints
+--report-path    save path for the Markdown benchmark report (default: reports/benchmark_report.md)
 ```
 
 ### 5. Device selection
@@ -344,7 +347,7 @@ python benchmark.py --lrs 1e-3 1e-4 --epochs 10
 
 ## Testing
 
-The project ships with **276 pytest tests** covering every major component.
+The project ships with **286 pytest tests** covering every major component.
 
 ### Run the tests locally
 
@@ -363,7 +366,7 @@ pytest tests/test_optimizers.py::TestShampoo -v
 pytest tests/test_train.py::TestTrainingLoop::test_loss_decreases_over_epochs -v
 ```
 
-Expected output: `276 passed` in a few seconds (all on CPU, no downloads needed).
+Expected output: `286 passed` in a few seconds (all on CPU, no downloads needed).
 
 ### Test files
 
@@ -379,6 +382,7 @@ Expected output: `276 passed` in a few seconds (all on CPU, no downloads needed)
 | `tests/test_plot_from_logs.py` | 9 | Log-replay plotting from saved session directories |
 | `tests/test_lr_finder.py` | 7 | History keys/shape; monotone LR schedule; weight/LR state restoration; suggestion range; AdaHessian compatibility |
 | `tests/test_benchmark.py` | 6 | `run_benchmark()` LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes |
+| `tests/test_report.py` | 10 | `generate_report()`: returns string, file creation, content parity, all section headers, empty save_path skips file, multi-optimizer rankings |
 
 ### CI pipeline
 
@@ -764,3 +768,4 @@ A narrative record of how the project was built, session by session. The full lo
 | 20 | LR sweep in benchmark | `--lr` → `--lrs` (nargs="+"); per-optimizer defaults preserved; series names include `lr=` suffix when sweeping; `test_benchmark.py` (6 tests) |
 | 21 | AdaBelief, SignSGD, AdaFactor | 3 new custom optimizers; belief EMA; sign updates; factored second moment |
 | 22 | Sophia, Prodigy, Schedule-Free AdamW | 3 more optimizers; Hessian clipping; parameter-free scaling; iterate averaging |
+| 23 | Benchmark report generator | `report.py` — `generate_report()`; `--report-path` flag in `benchmark.py`; 10 new tests |

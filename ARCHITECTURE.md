@@ -109,6 +109,7 @@ What it does in `main()`:
    - Each combo: build model → build optimizer → call `run_training()` → log with `TrainingLogger`
 4. `plot_benchmark()` — render a multi-panel comparison figure (one row per dataset/model pair,
    one line per optimizer, five metric columns)
+5. `generate_report()` — write a Markdown summary report to `--report-path`
 
 `benchmark.py` deliberately has its own `OPTIMIZER_REGISTRY`, `MODEL_REGISTRY`, and
 `DATASET_REGISTRY` so it can control colors, display names, and default LRs independently
@@ -338,6 +339,7 @@ for each (dataset, model, optimizer) combination:
     │
     ▼
 plot_benchmark(results, ...)  ───────────────────► visualizer.py
+generate_report(results, cfg, path)  ───────────► report.py
 TrainingLogger.close()  ────────────────────────► logger.py
 ```
 
@@ -374,6 +376,7 @@ benchmark.py
  │              linear_layer_names, save_checkpoint, set_seed)
  ├── model.py
  ├── logger.py
+ ├── report.py  (generate_report)
  ├── visualizer.py  (plot_benchmark)
  └── optimizers/__init__.py
 
@@ -428,7 +431,8 @@ All diagnostics, logging, visualization, and tests work automatically.
 | `test_lr_finder.py` | 7 | history keys/length, monotone LR, state restoration (weights + LR), suggestion range, AdaHessian path |
 | `test_checkpoints.py` | 5 | save_checkpoint(), load, config keys, best vs final checkpoint logic |
 | `test_benchmark.py` | 6 | run_benchmark() LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes |
-| **Total** | **276** | |
+| `test_report.py` | 10 | generate_report(): returns string, file creation, content parity, all section headers, empty save_path, multi-optimizer rankings |
+| **Total** | **286** | |
 
 ---
 
@@ -450,5 +454,6 @@ GOAL: Make it easy to implement a new optimizer, plug it in, and immediately
 ├── visualizer.py       ← WHERE you see it (live dashboard + comparison plots)
 ├── lr_finder.py        ← HOW you choose the LR (range test, no guessing)
 │
-└── logger.py           ← HOW you keep it (structured logs for every run)
+├── logger.py           ← HOW you keep it (structured logs for every run)
+└── report.py           ← HOW you share it (Markdown report after benchmark runs)
 ```

@@ -4,6 +4,52 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 19 — Benchmark Report Generator
+
+### New file: `report.py`
+
+`generate_report(results, config, save_path) -> str`
+
+Produces a six-section Markdown report from the `results` dict returned by `run_benchmark()`.
+
+**Section 1 — Header**: generation timestamp.
+
+**Section 2 — Setup**: table of benchmark settings (datasets, models, optimizers, epochs, batch size, scheduler, weight decays, LRs, seed). Datasets/models/optimizers extracted from `results` keys; other settings from the `config` dict.
+
+**Section 3 — Results Overview**: one sub-table per `(dataset, model)` combination, sorted by dataset then model. Columns: `Optimizer | Final Test Acc (%) | Best Test Acc (%) | Epochs Run | Time (s) | Train-Test Gap (%)`. Rows sorted descending by final test accuracy.
+
+**Section 4 — Rankings**: one `###` subsection per `(dataset, model)` combination. Four ranked bullet points: 🥇 best final accuracy, 🚀 fastest, 📈 best peak accuracy, 🎯 most stable (lowest `std(test_acc[-3:])`, fallback to full list).
+
+**Section 5 — Per-Optimizer Summary**: one `###` subsection per series name. Per-combo bullet with final/peak accuracy, epoch count, and elapsed time. Appends `⚠️ high train-test gap (X.X%)` when gap > 5% and `(early stopped at epoch N)` when applicable.
+
+**Section 6 — Key Observations**: auto-generated bullets identifying highest overall accuracy, fastest optimizer (by mean time), most stable optimizer (by mean last-3 std), early-stop count, and high-gap count.
+
+File writing follows the same `os.makedirs(..., exist_ok=True)` pattern as `visualizer.py`. Returns the Markdown string regardless of `save_path`; skips writing when `save_path=''`.
+
+### `benchmark.py`
+
+- New import: `from report import generate_report`.
+- New CLI flag: `--report-path` (default: `reports/benchmark_report.md`; `''` to disable).
+- `main()` calls `generate_report(results, report_cfg, save_path=args.report_path)` immediately after `plot_benchmark()` and prints the save path.
+
+### `tests/test_report.py` (new)
+
+10 tests:
+- `test_returns_string` — `generate_report(..., save_path='')` returns a `str`
+- `test_file_created` — file is written when `save_path` is given
+- `test_file_content_matches_return_value` — file content equals the return value
+- `test_markdown_has_header` — output starts with `# Benchmark Report`
+- `test_markdown_has_setup_section` — `## Setup` in output
+- `test_markdown_has_results_section` — `## Results` in output
+- `test_markdown_has_per_optimizer_section` — `## Per-Optimizer` in output
+- `test_markdown_has_observations_section` — `## Key Observations` in output
+- `test_empty_save_path_skips_file` — non-empty string returned; no file written
+- `test_multiple_optimizers_rankings_present` — `Best final accuracy` and `Fastest` in output
+
+Total tests: 286 (up from 276).
+
+---
+
 ## Round 18 — Sophia, Prodigy, and Schedule-Free AdamW
 
 ### New files: `optimizers/sophia.py`, `optimizers/prodigy.py`, `optimizers/schedule_free.py`

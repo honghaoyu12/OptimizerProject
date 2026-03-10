@@ -434,6 +434,33 @@ Total tests: 276 (up from 258). CI green on `main`.
 
 ---
 
+## Session 23 — Benchmark Report Generator
+
+**What we discussed:**
+- After a benchmark run, users had to inspect raw CSVs or the comparison plot to understand results — no human-readable narrative existed
+- Decided to add a Markdown report generator as a standalone module callable from `benchmark.py`
+
+**What was built:**
+- `report.py` (new) — `generate_report(results, config, save_path)`:
+  - Section 1: header with generation timestamp
+  - Section 2: setup table (datasets, models, optimizers, epochs, batch size, scheduler, LRs, weight decays, seed)
+  - Section 3: results overview — one sub-table per `(dataset, model)` combo, columns: final/best test acc, epochs run, time, train-test gap; sorted by final accuracy
+  - Section 4: rankings per combo — 🥇 best final accuracy, 🚀 fastest, 📈 best peak accuracy, 🎯 most stable
+  - Section 5: per-optimizer summary — bullet per combo with ⚠️ gap warning and early-stop annotation
+  - Section 6: key observations — best overall accuracy, fastest/most-stable overall, early-stop and high-gap counts
+  - Returns the Markdown string always; writes file only when `save_path != ''`
+- `benchmark.py` — `--report-path` flag added (default: `reports/benchmark_report.md`); `generate_report()` called after `plot_benchmark()` in `main()`
+- `tests/test_report.py` (new) — 10 tests; all pass in 0.01 s
+
+**Decision: not adding report generation to `train.py`**
+- Single-run reports would have no Rankings or Key Observations to populate — the format was designed around multi-optimizer comparison
+- `train.py` is already well-served by `logger.py` (per-epoch CSVs, run summary)
+- Can revisit if multi-seed averaging or ablation sweeps are added to `train.py`
+
+Total tests: 286 (up from 276). CI green on `main`.
+
+---
+
 ## Current State
 
 | Component | Status |
@@ -448,7 +475,8 @@ Total tests: 276 (up from 258). CI green on `main`.
 | LR range test | `lr_finder.py` + `--find-lr` in `train.py` |
 | LR sweep | `--lrs` in `benchmark.py` — single value = override, multiple = sweep with series labels |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
-| Tests | 276 passing |
+| Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
+| Tests | 286 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |
