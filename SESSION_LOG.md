@@ -461,6 +461,27 @@ Total tests: 286 (up from 276). CI green on `main`.
 
 ---
 
+## Session 24 — Multi-Seed Averaging
+
+**What we discussed:**
+- A single benchmark run is statistically noisy (±1% from weight initialisation alone)
+- Wanted the ability to run each combination N times with different seeds, aggregate into mean ± std, and surface the uncertainty everywhere
+
+**What was built:**
+- `benchmark.py`:
+  - `_aggregate_histories(histories)` — new helper; stacks N seed histories into numpy arrays; computes mean and std for all list-valued keys; handles scalars, `early_stopped_epoch`, `step_losses`, and dict-valued `weight_norms`/`grad_norms`; copies remaining keys from `histories[0]`
+  - `run_benchmark()` — new `num_seeds=1` parameter; seed loop rebuilds model + optimizer fresh each iteration; `set_seed(base_seed + seed_idx)` called when `num_seeds > 1` or `seed is not None`; raw history returned as-is when `num_seeds == 1` (no `_std` keys added)
+  - `--num-seeds` CLI flag (default: 1)
+  - `main()` — removed top-level `set_seed()` (moved into seed loop); passes `num_seeds`; adds it to `report_cfg`; prints banner when `num_seeds > 1`
+- `visualizer.py` — `plot_benchmark()` draws `fill_between` error bands (alpha=0.15) after each line when `f"{key}_std"` is present in the history
+- `report.py` — Seeds row in Setup table; `"XX.XX ± YY.YY"` formatting in Results Overview and Per-Optimizer Summary when `test_acc_std` present; seed-averaging bullet in Key Observations
+- `tests/test_benchmark.py` — 3 new tests (single result per combo, std keys added, no agg-std for num_seeds=1)
+- `tests/test_report.py` — 1 new test (± in output when std present)
+
+Total tests: 290 (up from 286). CI green on `main`.
+
+---
+
 ## Current State
 
 | Component | Status |
@@ -474,9 +495,10 @@ Total tests: 286 (up from 276). CI green on `main`.
 | Weight decay | per-parameter-group via `make_param_groups()` — biases and norm params excluded |
 | LR range test | `lr_finder.py` + `--find-lr` in `train.py` |
 | LR sweep | `--lrs` in `benchmark.py` — single value = override, multiple = sweep with series labels |
+| Multi-seed averaging | `--num-seeds` in `benchmark.py` — mean ± std histories; error bands in plot; ± in report |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 286 passing |
+| Tests | 290 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

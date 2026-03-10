@@ -105,11 +105,9 @@ optimizers, then runs every combination and produces a single comparison plot.
 What it does in `main()`:
 1. Parse CLI flags (shared hyperparameters for all runs)
 2. Interactive `prompt_multiselect()` menus for datasets, models, and optimizers
-3. `run_benchmark()` — nested loop over all combinations:
-   - Each combo: build model → build optimizer → call `run_training()` → log with `TrainingLogger`
-4. `plot_benchmark()` — render a multi-panel comparison figure (one row per dataset/model pair,
-   one line per optimizer, five metric columns)
-5. `generate_report()` — write a Markdown summary report to `--report-path`
+3. `run_benchmark()` — nested loop over all combinations; inner seed loop (controlled by `--num-seeds`) rebuilds model + optimizer fresh each seed and calls `run_training()`; `_aggregate_histories()` merges N seed histories into mean ± std when `num_seeds > 1`
+4. `plot_benchmark()` — render a multi-panel comparison figure (one row per dataset/model pair, one line per optimizer, five metric columns); draws `fill_between` error bands when `_std` keys are present
+5. `generate_report()` — write a Markdown summary report to `--report-path`; shows ± std when `test_acc_std` is present
 
 `benchmark.py` deliberately has its own `OPTIMIZER_REGISTRY`, `MODEL_REGISTRY`, and
 `DATASET_REGISTRY` so it can control colors, display names, and default LRs independently
@@ -329,17 +327,21 @@ run_training()
 CLI args + interactive prompts
     │
     ▼
-for each (dataset, model, optimizer) combination:
+for each (dataset, model, optimizer, lr, wd) combination:
     │
     ├─ get_dataloaders()  ────────────────────────► synthetic_datasets.py / torchvision
-    ├─ model factory()  ──────────────────────────► model.py
-    ├─ optimizer factory()  ──────────────────────► optimizers/
-    ├─ run_training()  ──────────────────────────── (from train.py)
-    └─ TrainingLogger.log_run()  ────────────────► logger.py
+    │
+    └─ for seed_idx in range(num_seeds):           ← num_seeds=1 by default
+          set_seed(base_seed + seed_idx)
+          model factory()  ────────────────────────► model.py
+          optimizer factory()  ────────────────────► optimizers/
+          run_training()  ─────────────────────────── (from train.py)
+          TrainingLogger.log_run()  ───────────────► logger.py
+       _aggregate_histories(seed_histories)        ← skipped when num_seeds=1
     │
     ▼
-plot_benchmark(results, ...)  ───────────────────► visualizer.py
-generate_report(results, cfg, path)  ───────────► report.py
+plot_benchmark(results, ...)  ───────────────────► visualizer.py  (fill_between bands when _std keys present)
+generate_report(results, cfg, path)  ───────────► report.py  (± std when test_acc_std present)
 TrainingLogger.close()  ────────────────────────► logger.py
 ```
 
@@ -430,9 +432,9 @@ All diagnostics, logging, visualization, and tests work automatically.
 | `test_plot_from_logs.py` | 9 | load_session(), reconstruct_results(), series naming, weight-decay sweeps |
 | `test_lr_finder.py` | 7 | history keys/length, monotone LR, state restoration (weights + LR), suggestion range, AdaHessian path |
 | `test_checkpoints.py` | 5 | save_checkpoint(), load, config keys, best vs final checkpoint logic |
-| `test_benchmark.py` | 6 | run_benchmark() LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes |
-| `test_report.py` | 10 | generate_report(): returns string, file creation, content parity, all section headers, empty save_path, multi-optimizer rankings |
-| **Total** | **286** | |
+| `test_benchmark.py` | 9 | run_benchmark() LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes; multi-seed: single result per combo, std keys added, no agg-std for num_seeds=1 |
+| `test_report.py` | 11 | generate_report(): returns string, file creation, content parity, all section headers, empty save_path, multi-optimizer rankings, ± std shown when test_acc_std present |
+| **Total** | **290** | |
 
 ---
 

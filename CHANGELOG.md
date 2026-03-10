@@ -4,6 +4,49 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 20 — Multi-Seed Averaging (`--num-seeds`)
+
+### `benchmark.py`
+
+- **New helper `_aggregate_histories(histories: list[dict]) -> dict`** — placed above `run_benchmark()`. Stacks N per-seed history dicts into numpy arrays and reduces along the seed axis:
+  - List-valued keys (`train_loss`, `test_loss`, `train_acc`, `test_acc`, `learning_rates`, `grad_norm_global`, `grad_norm_before_clip`, `grad_norm_std`, `time_elapsed`): mean stored under the original key; std stored under `f"{key}_std"`.
+  - Scalar keys (`target_accuracy_epoch`, `target_accuracy_time`): mean of non-None values; `None` if all None.
+  - `early_stopped_epoch`: `round(mean)` of non-None values; `None` if all None.
+  - `step_losses`: mean across seeds (truncated to shortest list).
+  - Dict-valued keys (`weight_norms`, `grad_norms`): per-subkey list-averaging.
+  - Any other key: copied from `histories[0]`.
+- **`run_benchmark()` signature** — new `num_seeds: int = 1` parameter at the end (default = 1, fully backward-compatible).
+- **Seed loop** — the single `run_training()` call is replaced by a loop from `0` to `num_seeds - 1`. Model and optimizer are rebuilt fresh inside each iteration. When `num_seeds > 1` or `seed is not None`, `set_seed(base_seed + seed_idx)` is called before each rebuild. Histories are collected into `seed_histories`; `_aggregate_histories()` is called when `num_seeds > 1`; raw history returned as-is for `num_seeds == 1`. Each seed's history is individually logged with `logger.log_run()`.
+- **`parse_args()`** — new `--num-seeds` flag (default: 1).
+- **`main()`** — removed top-level `set_seed()` call (responsibility moved into the seed loop); passes `num_seeds=args.num_seeds` to `run_benchmark()`; adds `"num_seeds"` to `report_cfg`; prints `"Seed averaging : N seeds (base B)"` banner when `num_seeds > 1`.
+
+### `visualizer.py`
+
+- **`plot_benchmark()`** — after each `ax.plot(...)`, checks `history.get(f"{key}_std", [])`. When present and the same length as `values`, draws a `fill_between` error band (alpha=0.15, same color as the line). No signature change; bands appear only when `_std` keys are present in the results.
+
+### `report.py`
+
+- **Setup section** — new **Seeds** row: `"N (averaged)"` when `num_seeds > 1`, `"1 (single run)"` otherwise. `num_seeds` read from `config.get("num_seeds", 1)`.
+- **Results Overview** — when `test_acc_std` is present in the history, Final Test Acc and Best Test Acc columns show `"XX.XX ± YY.YY"` format. Best std is taken at the epoch of peak mean accuracy.
+- **Per-Optimizer Summary** — same ± formatting applied to the final/peak accuracy bullets.
+- **Key Observations** — new bullet `"Seed averaging: results averaged over N seeds"` appended when `num_seeds > 1`.
+
+### `tests/test_benchmark.py`
+
+Three new tests:
+- `test_num_seeds_single_result_per_combo` — `num_seeds=2` produces exactly 1 result entry per combo.
+- `test_num_seeds_adds_std_keys` — aggregated history contains `"test_acc_std"` and `"train_loss_std"`.
+- `test_num_seeds_one_no_std_keys` — `num_seeds=1` adds no aggregation `_std` keys (the native `grad_norm_std` key is excluded from the check since it predates this feature).
+
+### `tests/test_report.py`
+
+One new test:
+- `test_report_shows_std_when_present` — history with `"test_acc_std"` key → `"±"` appears in report output.
+
+Total tests: 290 (up from 286).
+
+---
+
 ## Round 19 — Benchmark Report Generator
 
 ### New file: `report.py`
