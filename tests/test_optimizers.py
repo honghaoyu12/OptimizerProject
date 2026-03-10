@@ -3,7 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor
+from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
 from train import build_optimizer, OPTIMIZER_REGISTRY
 
 
@@ -42,6 +42,7 @@ class TestOptimizerRegistry:
             "adam", "adamw", "nadam", "radam", "adagrad",
             "sgd", "rmsprop", "vanilla_sgd", "lion", "lamb", "shampoo",
             "muon", "adan", "adahessian", "adabelief", "signsgd", "adafactor",
+            "sophia", "prodigy", "sf_adamw",
         }
         assert expected == set(OPTIMIZER_REGISTRY.keys())
 
@@ -489,3 +490,170 @@ class TestAdaFactor:
             opt.zero_grad()
         for p in model.parameters():
             assert torch.isfinite(p).all()
+
+
+# ---------------------------------------------------------------------------
+# Sophia
+# ---------------------------------------------------------------------------
+
+class TestSophia:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = Sophia(model.parameters(), lr=1e-4)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "exp_avg" in opt.state[p]
+            assert "hess" in opt.state[p]
+            assert "step" in opt.state[p]
+
+    def test_hessian_updated_at_update_freq(self):
+        """hess should change on step 1 and step update_freq+1, not in between."""
+        model = nn.Linear(4, 2, bias=False)
+        opt = Sophia(model.parameters(), lr=1e-4, update_freq=5)
+        # Step 1 — hess is updated (step % update_freq == 1)
+        model(torch.randn(2, 4)).sum().backward()
+        opt.step()
+        opt.zero_grad()
+        h_after_1 = opt.state[model.weight]["hess"].clone()
+        # Steps 2–5 — hess should not change
+        for _ in range(4):
+            model(torch.randn(2, 4)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        h_after_5 = opt.state[model.weight]["hess"].clone()
+        assert torch.allclose(h_after_1, h_after_5)
+        # Step 6 — hess updated again
+        model(torch.randn(2, 4)).sum().backward()
+        opt.step()
+        opt.zero_grad()
+        h_after_6 = opt.state[model.weight]["hess"].clone()
+        assert not torch.allclose(h_after_5, h_after_6)
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = Sophia(model.parameters(), lr=1e-4, update_freq=5)
+        for _ in range(25):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_weights_finite_with_hvp(self):
+        """With create_graph=True the full HVP path is used and weights stay finite."""
+        model = nn.Linear(8, 4)
+        opt = Sophia(model.parameters(), lr=1e-4, update_freq=3)
+        for _ in range(10):
+            loss = model(torch.randn(4, 8)).sum()
+            loss.backward(create_graph=True)
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+
+# ---------------------------------------------------------------------------
+# Prodigy
+# ---------------------------------------------------------------------------
+
+class TestProdigy:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = Prodigy(model.parameters())
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "x0" in opt.state[p]
+            assert "s" in opt.state[p]
+            assert "exp_avg" in opt.state[p]
+            assert "exp_avg_sq" in opt.state[p]
+
+    def test_d_grows_over_time(self):
+        """d should be non-decreasing (Prodigy's monotone guarantee)."""
+        model = nn.Linear(8, 4)
+        opt = Prodigy(model.parameters(), d0=1e-6)
+        d_values = []
+        for _ in range(10):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+            d_values.append(opt.param_groups[0]["d"])
+        # d must never decrease
+        for i in range(1, len(d_values)):
+            assert d_values[i] >= d_values[i - 1]
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = Prodigy(model.parameters())
+        for _ in range(10):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_weight_decay_shrinks_params(self):
+        def _run(wd):
+            torch.manual_seed(0)
+            model = nn.Linear(4, 2, bias=False)
+            nn.init.constant_(model.weight, 1.0)
+            opt = Prodigy(model.parameters(), weight_decay=wd)
+            for _ in range(5):
+                model(torch.randn(2, 4)).sum().backward()
+                opt.step()
+                opt.zero_grad()
+            return model.weight.norm().item()
+
+        assert _run(1.0) < _run(0.0)
+
+
+# ---------------------------------------------------------------------------
+# ScheduleFreeAdamW
+# ---------------------------------------------------------------------------
+
+class TestScheduleFreeAdamW:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = ScheduleFreeAdamW(model.parameters(), lr=1e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "x" in opt.state[p]
+            assert "exp_avg_sq" in opt.state[p]
+            assert "step" in opt.state[p]
+
+    def test_params_differ_from_x_after_steps(self):
+        """After >1 steps, params (y) should differ from x (the average)."""
+        model = nn.Linear(8, 4, bias=False)
+        opt = ScheduleFreeAdamW(model.parameters(), lr=1e-3)
+        for _ in range(5):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        w = model.weight
+        x = opt.state[w]["x"]
+        # y = (1-beta1)*x + beta1*z; after several steps y != x in general
+        assert not torch.allclose(w.data, x)
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = ScheduleFreeAdamW(model.parameters(), lr=1e-3)
+        for _ in range(10):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_get_averaged_params_returns_x(self):
+        """get_averaged_params() should return tensors close to state['x']."""
+        model = nn.Linear(4, 2, bias=False)
+        opt = ScheduleFreeAdamW(model.parameters(), lr=1e-3)
+        for _ in range(3):
+            model(torch.randn(2, 4)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        averaged = opt.get_averaged_params()
+        for avg, p in zip(averaged, model.parameters()):
+            assert torch.allclose(avg, opt.state[p]["x"])
