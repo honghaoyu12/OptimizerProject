@@ -482,6 +482,31 @@ Total tests: 290 (up from 286). CI green on `main`.
 
 ---
 
+## Session 25 — Convergence Speed in Report and Plot
+
+**What we discussed:**
+- After adding `--num-seeds`, the report still only showed final/best accuracy and total time
+- `target_accuracy_epoch` and `target_accuracy_time` were already being computed by `run_training()` but not surfaced anywhere visible
+- Wanted a way to ask "which optimizer hits 90% first?" rather than "which finishes highest?"
+- Also wanted the configurable threshold (`--target-acc`) since 95% is unreachable on CIFAR-100
+
+**What was built:**
+- `benchmark.py`:
+  - `--target-acc` CLI flag (default: 0.95) — threshold forwarded through `run_benchmark()` → `run_training()`
+  - `run_benchmark()` signature gains `target_acc: float = 0.95`; `main()` adds it to `report_cfg`
+- `report.py`:
+  - Setup table: new **Target acc** row
+  - Results Overview: two new columns — `"Epochs to N%"` and `"Time to N% (s)"`; shows `"X.X"` or `"—"` (em-dash) when not reached
+  - Per-Optimizer bullets: appends convergence details when `target_accuracy_epoch` is present
+- `visualizer.py`:
+  - `plot_benchmark()`: vertical dotted `axvline` marker on the Test Accuracy panel at `target_accuracy_epoch` (same color as series, `linestyle=":"`, `alpha=0.7`)
+- `tests/test_benchmark.py`: 2 new tests (target_acc=0.0 populates epoch; target_acc=1.0 gives None)
+- `tests/test_report.py`: 2 new tests (convergence columns present; em-dash when None)
+
+Total tests: 294 (up from 290). CI green on `main`.
+
+---
+
 ## Current State
 
 | Component | Status |
@@ -496,9 +521,10 @@ Total tests: 290 (up from 286). CI green on `main`.
 | LR range test | `lr_finder.py` + `--find-lr` in `train.py` |
 | LR sweep | `--lrs` in `benchmark.py` — single value = override, multiple = sweep with series labels |
 | Multi-seed averaging | `--num-seeds` in `benchmark.py` — mean ± std histories; error bands in plot; ± in report |
+| Convergence speed | `--target-acc` in `benchmark.py` — "Epochs to N%" / "Time to N%" columns in report; axvline marker in plot |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 290 passing |
+| Tests | 294 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

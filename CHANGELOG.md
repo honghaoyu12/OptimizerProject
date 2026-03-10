@@ -4,6 +4,40 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 21 — Convergence Speed (`--target-acc`)
+
+### `benchmark.py`
+
+- **New `--target-acc` CLI flag** (default: 0.95) — sets the accuracy threshold used to record `target_accuracy_epoch` and `target_accuracy_time` in each history dict. Passed through `run_benchmark()` → `run_training()`. Lets users set a dataset-appropriate threshold (e.g. `--target-acc 0.4` for CIFAR-100).
+- **`run_benchmark()` signature** — new `target_acc: float = 0.95` parameter; forwarded to `run_training()` for every seed.
+- **`main()`** — adds `"target_acc"` to `report_cfg` so the report reflects the threshold in use.
+
+### `report.py`
+
+- **Setup section** — new **Target acc** row showing `"{N}%"`.
+- **Results Overview table** — two new columns: `"Epochs to {N}%"` and `"Time to {N}% (s)"`. Values are `"X.X"` when the threshold was reached; `"—"` (em-dash) when it was not.
+- **Per-Optimizer Summary bullets** — appends `", reached {N}% at epoch X.X (Y.Y s)"` when `target_accuracy_epoch` is populated.
+
+### `visualizer.py`
+
+- **`plot_benchmark()` — convergence marker** — on the Test Accuracy panel, a vertical dotted `axvline` is drawn at `target_accuracy_epoch` (same color as the series, `linestyle=":"`, `alpha=0.7`) when the key is present.
+
+### `tests/test_benchmark.py`
+
+Two new tests:
+- `test_target_acc_low_populates_convergence_epoch` — `target_acc=0.0` guarantees the convergence epoch is recorded.
+- `test_target_acc_high_gives_none` — `target_acc=1.0` (impossible) gives `None` convergence epoch.
+
+### `tests/test_report.py`
+
+Two new tests:
+- `test_report_convergence_columns_present` — `"Epochs to"` and `"Time to"` appear in the report.
+- `test_report_convergence_dash_when_none` — `"—"` appears in the report when `target_accuracy_epoch` is absent.
+
+Total tests: 294 (up from 290).
+
+---
+
 ## Round 20 — Multi-Seed Averaging (`--num-seeds`)
 
 ### `benchmark.py`
