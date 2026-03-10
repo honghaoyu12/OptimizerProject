@@ -355,3 +355,84 @@ def plot_benchmark(
         print(f"\nBenchmark figure saved to {save_path}")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# LR sensitivity plot
+# ---------------------------------------------------------------------------
+
+def plot_lr_sensitivity(
+    results: dict,
+    save_path: str | None = "plots/lr_sensitivity.png",
+) -> None:
+    """Plot final test accuracy vs learning rate for each optimizer.
+
+    One subplot per (dataset × model) combination; one line per optimizer.
+    Error bars are drawn when ``test_acc_std`` is present (multi-seed runs).
+    Silently skips when no history contains a ``"config_lr"`` key.
+
+    Parameters
+    ----------
+    results : {(dataset_name, model_name, series_name): history_dict}
+        Same format as returned by ``run_benchmark()``.  Each history should
+        contain a ``"config_lr"`` key (set automatically by ``run_benchmark()``).
+    save_path : str | None
+        File path to save the figure.  ``None`` or ``''`` disables saving.
+    """
+    lr_entries = {k: v for k, v in results.items() if v.get("config_lr") is not None}
+    if not lr_entries:
+        print("\n  (LR sensitivity plot skipped: no config_lr found in results)")
+        return
+
+    combos = sorted({(k[0], k[1]) for k in lr_entries})
+    n_rows = len(combos)
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(8, 4 * n_rows), squeeze=False)
+    fig.suptitle("LR Sensitivity", fontsize=14, fontweight="bold")
+
+    base_opts = sorted({k[2].split(" (")[0] for k in lr_entries})
+    cmap = plt.get_cmap("tab10")
+    opt_colors = {name: cmap(i % 10) for i, name in enumerate(base_opts)}
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Learning Rate (log scale)", fontsize=9)
+        ax.set_ylabel("Final Test Accuracy (%)", fontsize=9)
+        ax.set_xscale("log")
+
+        by_opt: dict[str, list[tuple]] = {}
+        for (d, m, series), hist in lr_entries.items():
+            if d != ds_name or m != mdl_name:
+                continue
+            base_opt = series.split(" (")[0]
+            lr = hist["config_lr"]
+            test_acc = hist.get("test_acc", [])
+            test_acc_std = hist.get("test_acc_std", [])
+            final_acc = test_acc[-1] * 100 if test_acc else float("nan")
+            final_std = test_acc_std[-1] * 100 if test_acc_std else float("nan")
+            by_opt.setdefault(base_opt, []).append((lr, final_acc, final_std))
+
+        for base_opt, points in sorted(by_opt.items()):
+            points.sort(key=lambda t: t[0])
+            lrs_p, accs, stds = zip(*points)
+            color = opt_colors.get(base_opt, "gray")
+            ax.plot(lrs_p, accs, "o-", color=color, label=base_opt,
+                    linewidth=1.8, markersize=5)
+            valid_stds = [s for s in stds if not math.isnan(s)]
+            if valid_stds:
+                lo = [a - s for a, s in zip(accs, stds)]
+                hi = [a + s for a, s in zip(accs, stds)]
+                ax.fill_between(lrs_p, lo, hi, color=color, alpha=0.15)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  LR sensitivity figure saved to {save_path}")
+
+    plt.show()

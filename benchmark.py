@@ -26,7 +26,7 @@ from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
 from report import generate_report
-from visualizer import plot_benchmark
+from visualizer import plot_benchmark, plot_lr_sensitivity
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +424,7 @@ def run_benchmark(
                             _aggregate_histories(seed_histories) if num_seeds > 1
                             else seed_histories[0]
                         )
+                        aggregated["config_lr"] = lr
                         results[(ds_name, mdl_name, series_name)] = aggregated
 
     return results
@@ -472,6 +473,9 @@ def parse_args():
                    help="Seeds to average over per run (default: 1 = single run)")
     p.add_argument("--target-acc", default=0.95, type=float,
                    help="Accuracy threshold for convergence speed columns in report (default: 0.95)")
+    p.add_argument("--save-lr-plot", default="plots/lr_sensitivity.png",
+                   help="Path to save LR sensitivity figure ('' to disable; "
+                        "only generated when --lrs has ≥2 values)")
     return p.parse_args()
 
 
@@ -551,6 +555,10 @@ def main():
     # ── Plot ──────────────────────────────────────────────────────────────
     save_path = args.save_plot if args.save_plot else None
     plot_benchmark(results, dataset_names, model_names, series_names, opt_colors, save_path=save_path)
+
+    # ── LR Sensitivity Plot ───────────────────────────────────────────────
+    if args.lrs is not None and len(args.lrs) > 1 and args.save_lr_plot:
+        plot_lr_sensitivity(results, save_path=args.save_lr_plot)
 
     # ── Report ────────────────────────────────────────────────────────────
     if args.report_path:
