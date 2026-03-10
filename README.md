@@ -270,6 +270,7 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --seed           random seed for reproducibility
 --num-seeds      number of seeds to average over per run  (default: 1 = single run)
 --target-acc     accuracy threshold for convergence-speed columns in report  (default: 0.95)
+--save-lr-plot   path for LR sensitivity figure (default: plots/lr_sensitivity.png; only generated when --lrs has ≥2 values)
 --checkpoint-dir directory for per-run checkpoints
 --report-path    save path for the Markdown benchmark report (default: reports/benchmark_report.md)
 ```
@@ -371,7 +372,7 @@ pytest tests/test_optimizers.py::TestShampoo -v
 pytest tests/test_train.py::TestTrainingLoop::test_loss_decreases_over_epochs -v
 ```
 
-Expected output: `294 passed` in a few seconds (all on CPU, no downloads needed).
+Expected output: `299 passed` in a few seconds (all on CPU, no downloads needed).
 
 ### Test files
 
@@ -388,6 +389,7 @@ Expected output: `294 passed` in a few seconds (all on CPU, no downloads needed)
 | `tests/test_lr_finder.py` | 7 | History keys/shape; monotone LR schedule; weight/LR state restoration; suggestion range; AdaHessian compatibility |
 | `tests/test_benchmark.py` | 11 | `run_benchmark()` LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes; multi-seed: single result per combo, std keys added, no agg-std for num_seeds=1; convergence: target_acc=0.0 populates epoch, target_acc=1.0 gives None |
 | `tests/test_report.py` | 13 | `generate_report()`: returns string, file creation, content parity, all section headers, empty save_path skips file, multi-optimizer rankings, ± std shown when test_acc_std present; convergence columns present; em-dash when None; ± shown when std present |
+| `tests/test_visualizer.py` | 5 | `plot_lr_sensitivity()`: runs without error, saves file, skips gracefully when no config_lr, multi-optimizer, std error bands |
 
 ### CI pipeline
 

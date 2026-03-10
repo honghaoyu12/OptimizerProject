@@ -4,6 +4,36 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 22 — LR Sensitivity Plot (`plot_lr_sensitivity`)
+
+### `visualizer.py`
+
+- **New `plot_lr_sensitivity(results, save_path)` function** — plots final test accuracy (%) vs learning rate (log scale) after a multi-LR benchmark sweep.
+  - One subplot per `(dataset × model)` combination; one line per optimizer.
+  - Base optimizer name extracted from series name by splitting on ` (` — handles `"Adam (lr=0.001, wd=1e-4)"` → `"Adam"`.
+  - Colors cycled from `tab10` keyed by base optimizer name order.
+  - `fill_between` error bands (alpha=0.15) drawn when `test_acc_std` is present (multi-seed runs).
+  - Silently skips with an informational print when no history contains a `"config_lr"` key.
+
+### `benchmark.py`
+
+- **`config_lr` stored in every history dict** — one float added to each aggregated history after the seed loop, recording the actual LR used for that series. Enables the LR sensitivity plot without parsing series name strings.
+- **`--save-lr-plot` CLI flag** (default: `plots/lr_sensitivity.png`) — path to save the figure. Only generated when `--lrs` has ≥2 values; pass `''` to disable.
+- **`main()`** — calls `plot_lr_sensitivity(results, save_path=args.save_lr_plot)` after `plot_benchmark()` when `len(lrs) > 1`.
+
+### `tests/test_visualizer.py` (new file)
+
+Five new tests:
+- `test_runs_without_error` — function completes on valid data.
+- `test_saves_file` — PNG file created at the requested path.
+- `test_skips_when_no_config_lr` — skip message printed, no file written when `config_lr` absent.
+- `test_multi_optimizer` — multiple optimizer lines rendered without error.
+- `test_std_error_bands_no_error` — `test_acc_std` present → `fill_between` bands drawn without error.
+
+Total tests: 299 (up from 294).
+
+---
+
 ## Round 21 — Convergence Speed (`--target-acc`)
 
 ### `benchmark.py`

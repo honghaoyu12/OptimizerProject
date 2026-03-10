@@ -507,6 +507,29 @@ Total tests: 294 (up from 290). CI green on `main`.
 
 ---
 
+## Session 26 — LR Sensitivity Plot
+
+**What we discussed:**
+- The existing `--lrs` sweep produced a time-series comparison (accuracy over epochs per LR) but didn't answer "how forgiving is this optimizer to LR choice?"
+- Wanted a dedicated summary plot: final test accuracy vs learning rate on a log scale, one curve per optimizer
+- Key insight: adaptive methods (Adam, AdaBelief) should show a wide flat peak; momentum-only methods (SGD, Muon) should show a sharp spike — seeing this difference visually is more useful than any table
+
+**What was built:**
+- `visualizer.py` — new `plot_lr_sensitivity(results, save_path)`:
+  - One subplot per `(dataset × model)` combo; one line per base optimizer name
+  - Log-scale X axis; `fill_between` error bands when `test_acc_std` present (`--num-seeds` runs)
+  - Extracts base optimizer name by splitting series name on ` (` — handles all suffix formats
+  - Skips gracefully (print + return) if no `config_lr` found in results
+- `benchmark.py`:
+  - `config_lr` stored in every aggregated history dict after the seed loop
+  - `--save-lr-plot plots/lr_sensitivity.png` flag
+  - `main()` calls `plot_lr_sensitivity()` automatically when `--lrs` has ≥2 values
+- `tests/test_visualizer.py` (new): 5 tests covering runs, file saving, skip behaviour, multi-optimizer, and std bands
+
+Total tests: 299 (up from 294). CI green on `main`.
+
+---
+
 ## Current State
 
 | Component | Status |
@@ -522,9 +545,10 @@ Total tests: 294 (up from 290). CI green on `main`.
 | LR sweep | `--lrs` in `benchmark.py` — single value = override, multiple = sweep with series labels |
 | Multi-seed averaging | `--num-seeds` in `benchmark.py` — mean ± std histories; error bands in plot; ± in report |
 | Convergence speed | `--target-acc` in `benchmark.py` — "Epochs to N%" / "Time to N%" columns in report; axvline marker in plot |
+| LR sensitivity plot | `plot_lr_sensitivity()` in `visualizer.py` — acc vs log-LR, auto-generated when `--lrs` has ≥2 values |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 294 passing |
+| Tests | 299 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |
