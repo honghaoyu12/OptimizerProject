@@ -85,11 +85,13 @@ class TrainingLogger:
 
             f.write("[epoch-wise]\n")
             writer = csv.writer(f)
+            learning_rates = history.get("learning_rates", [])
             writer.writerow([
                 "epoch", "train_loss", "train_acc",
-                "test_loss", "test_acc", "time_elapsed_s",
+                "test_loss", "test_acc", "time_elapsed_s", "learning_rate",
             ])
             for i in range(n_epochs):
+                lr_val = f"{learning_rates[i]:.8g}" if i < len(learning_rates) else ""
                 writer.writerow([
                     i + 1,
                     f"{history['train_loss'][i]:.6f}",
@@ -97,6 +99,7 @@ class TrainingLogger:
                     f"{history['test_loss'][i]:.6f}",
                     f"{history['test_acc'][i]:.6f}",
                     f"{history['time_elapsed'][i]:.2f}",
+                    lr_val,
                 ])
 
             step_losses = history.get("step_losses", [])
@@ -113,9 +116,10 @@ class TrainingLogger:
             writer = csv.writer(f)
             writer.writerow([
                 "epoch", "train_loss", "train_acc",
-                "test_loss", "test_acc", "time_elapsed_s",
+                "test_loss", "test_acc", "time_elapsed_s", "learning_rate",
             ])
             for i in range(n_epochs):
+                lr_val = f"{learning_rates[i]:.8g}" if i < len(learning_rates) else ""
                 writer.writerow([
                     i + 1,
                     f"{history['train_loss'][i]:.6f}",
@@ -123,6 +127,7 @@ class TrainingLogger:
                     f"{history['test_loss'][i]:.6f}",
                     f"{history['test_acc'][i]:.6f}",
                     f"{history['time_elapsed'][i]:.2f}",
+                    lr_val,
                 ])
 
         # Record summary entry (used by close())

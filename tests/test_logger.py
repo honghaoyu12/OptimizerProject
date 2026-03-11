@@ -86,8 +86,30 @@ class TestLogRun:
             reader = csv.DictReader(f)
             assert set(reader.fieldnames) == {
                 "epoch", "train_loss", "train_acc",
-                "test_loss", "test_acc", "time_elapsed_s",
+                "test_loss", "test_acc", "time_elapsed_s", "learning_rate",
             }
+
+    def test_epochs_csv_learning_rate_column(self, logger_and_dir):
+        """learning_rate column is present and matches history['learning_rates']."""
+        logger, run_dir = logger_and_dir
+        hist = _make_history(n_epochs=3)
+        logger.log_run(_make_config(), hist)
+        path = os.path.join(run_dir, "mnist_mlp_adam_epochs.csv")
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+        lr_vals = [float(r["learning_rate"]) for r in rows]
+        assert lr_vals == pytest.approx(hist["learning_rates"])
+
+    def test_epochs_csv_learning_rate_absent_when_no_lr_history(self, logger_and_dir):
+        """learning_rate column is empty string when history has no learning_rates key."""
+        logger, run_dir = logger_and_dir
+        hist = _make_history(n_epochs=2)
+        del hist["learning_rates"]
+        logger.log_run(_make_config(), hist)
+        path = os.path.join(run_dir, "mnist_mlp_adam_epochs.csv")
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+        assert all(r["learning_rate"] == "" for r in rows)
 
     def test_epochs_csv_row_count(self, logger_and_dir):
         logger, run_dir = logger_and_dir
