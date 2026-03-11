@@ -4,7 +4,7 @@ import matplotlib
 matplotlib.use("Agg")  # non-interactive backend — must be set before any pyplot import
 
 import pytest
-from visualizer import (plot_lr_sensitivity, plot_lr_sensitivity_scores,
+from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity_scores,
                         plot_grad_flow_heatmap, plot_optimizer_states,
                         plot_efficiency_frontier, _pareto_frontier,
                         _compute_lr_sensitivity)
@@ -400,4 +400,56 @@ class TestLrSensitivityScores:
         results = _make_sweep_results(opts=("Adam", "SGD"))
         out = tmp_path / "scores_multi.png"
         plot_lr_sensitivity_scores(results, save_path=str(out))
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# EMA line in plot_benchmark
+# ---------------------------------------------------------------------------
+
+def _make_benchmark_results_with_ema(n_epochs=3):
+    """Minimal results dict with test_acc_ema populated."""
+    return {
+        ("MNIST", "MLP", "Adam"): {
+            "train_loss":    [0.5, 0.4, 0.3],
+            "test_loss":     [0.6, 0.5, 0.4],
+            "train_acc":     [0.80, 0.85, 0.90],
+            "test_acc":      [0.75, 0.80, 0.85],
+            "test_acc_ema":  [0.76, 0.81, 0.86],
+            "learning_rates": [1e-3, 1e-3, 1e-3],
+        }
+    }
+
+
+class TestEMAPlot:
+    """Tests for EMA dashed line in plot_benchmark()."""
+
+    def test_ema_runs_without_error(self, tmp_path):
+        """plot_benchmark() does not raise when test_acc_ema is present."""
+        results = _make_benchmark_results_with_ema()
+        plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam"],
+                       {"Adam": "#1f77b4"}, save_path=str(tmp_path / "bench.png"))
+
+    def test_ema_saves_file(self, tmp_path):
+        """Figure file is created even when test_acc_ema is present."""
+        results = _make_benchmark_results_with_ema()
+        out = tmp_path / "bench_ema.png"
+        plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam"],
+                       {"Adam": "#1f77b4"}, save_path=str(out))
+        assert out.exists()
+
+    def test_no_ema_data_no_error(self, tmp_path):
+        """plot_benchmark() without test_acc_ema still works (backward-compatible)."""
+        results = {
+            ("MNIST", "MLP", "Adam"): {
+                "train_loss":     [0.5, 0.4],
+                "test_loss":      [0.6, 0.5],
+                "train_acc":      [0.80, 0.85],
+                "test_acc":       [0.75, 0.80],
+                "learning_rates": [1e-3, 1e-3],
+            }
+        }
+        out = tmp_path / "bench_no_ema.png"
+        plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam"],
+                       {"Adam": "#1f77b4"}, save_path=str(out))
         assert out.exists()

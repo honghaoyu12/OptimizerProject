@@ -105,9 +105,17 @@ def generate_report(
     combos = sorted({(k[0], k[1]) for k in results})
     for ds, mdl in combos:
         lines += [f"### {ds} / {mdl}", ""]
+        # Detect if any run in this combo has EMA data
+        combo_has_ema = any(
+            bool(hist.get("test_acc_ema"))
+            for (d, m, _), hist in results.items()
+            if d == ds and m == mdl
+        )
+        ema_header = " EMA Acc (%) | EMA Gap (pp) |" if combo_has_ema else ""
+        ema_sep    = "---|---|" if combo_has_ema else ""
         lines += [
-            f"| Optimizer | Final Test Acc (%) | Best Test Acc (%) | Epochs to {target_pct}% | Time to {target_pct}% (s) | Epochs Run | Time (s) | Train-Test Gap (%) |",
-            "|---|---|---|---|---|---|---|---|",
+            f"| Optimizer | Final Test Acc (%) | Best Test Acc (%) | Epochs to {target_pct}% | Time to {target_pct}% (s) | Epochs Run | Time (s) | Train-Test Gap (%) |{ema_header}",
+            f"|---|---|---|---|---|---|---|---|{ema_sep}",
         ]
 
         rows = []
@@ -116,6 +124,7 @@ def generate_report(
                 continue
             test_acc     = hist.get("test_acc", [])
             test_acc_std = hist.get("test_acc_std", [])
+            test_acc_ema = hist.get("test_acc_ema", [])
             train_acc    = hist.get("train_acc", [])
             train_loss   = hist.get("train_loss", [])
             elapsed      = hist.get("time_elapsed", [])
@@ -140,13 +149,23 @@ def generate_report(
             conv_ep_str   = f"{conv_epoch:.1f}" if conv_epoch is not None else "—"
             conv_time_str = f"{conv_time:.1f}"  if conv_time  is not None else "—"
 
-            rows.append((series, final_acc, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap))
+            ema_acc_pct = test_acc_ema[-1] * 100 if test_acc_ema else None
+            ema_gap_pp  = (ema_acc_pct - final_acc) if ema_acc_pct is not None else None
+
+            rows.append((series, final_acc, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap, ema_acc_pct, ema_gap_pp))
 
         rows.sort(key=lambda r: r[1], reverse=True)
-        for series, _, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap in rows:
-            lines.append(
-                f"| {series} | {final_str} | {best_str} | {conv_ep_str} | {conv_time_str} | {ep_run} | {total_time:.1f} | {gap:.2f} |"
-            )
+        for series, _, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap, ema_acc_pct, ema_gap_pp in rows:
+            if combo_has_ema:
+                ema_acc_str = f"{ema_acc_pct:.2f}" if ema_acc_pct is not None else "—"
+                ema_gap_str = f"{ema_gap_pp:+.2f}" if ema_gap_pp is not None else "—"
+                lines.append(
+                    f"| {series} | {final_str} | {best_str} | {conv_ep_str} | {conv_time_str} | {ep_run} | {total_time:.1f} | {gap:.2f} | {ema_acc_str} | {ema_gap_str} |"
+                )
+            else:
+                lines.append(
+                    f"| {series} | {final_str} | {best_str} | {conv_ep_str} | {conv_time_str} | {ep_run} | {total_time:.1f} | {gap:.2f} |"
+                )
         lines.append("")
 
     # ------------------------------------------------------------------

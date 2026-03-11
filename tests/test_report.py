@@ -160,3 +160,21 @@ def test_report_lr_sensitivity_section_absent_without_sweep():
     results = _make_results()
     out = generate_report(results, _DEFAULT_CONFIG, save_path="")
     assert "LR Sensitivity" not in out
+
+
+def test_report_ema_columns_present_when_ema_data_exists():
+    """history with 'test_acc_ema' key → 'EMA Acc' and 'EMA Gap' columns appear."""
+    results = _make_results()
+    key = next(iter(results))
+    results[key]["test_acc_ema"] = [0.74, 0.79, 0.84]
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "EMA Acc" in out
+    assert "EMA Gap" in out
+
+
+def test_report_ema_columns_absent_without_ema_data():
+    """Without 'test_acc_ema', EMA columns not in report."""
+    results = _make_results()
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "EMA Acc" not in out
+    assert "EMA Gap" not in out

@@ -46,8 +46,8 @@ OptimizerProject/
 │   ├── test_checkpoints.py   # 5 tests for checkpoint save/restore
 │   ├── test_plot_from_logs.py# 9 tests for log-replay plotting
 │   ├── test_lr_finder.py     # 7 tests for LRFinder
-│   ├── test_benchmark.py     # 9 tests for benchmark.py LR sweep and multi-seed logic
-│   └── test_report.py        # 11 tests for report.py Markdown generation
+│   ├── test_benchmark.py     # 11 tests for benchmark.py LR sweep and multi-seed logic
+│   └── test_report.py        # 15 tests for report.py Markdown generation
 ├── .github/
 │   └── workflows/
 │       └── ci.yml        # GitHub Actions CI — runs all tests on push/PR
@@ -195,6 +195,8 @@ python train.py --model vit --dataset cifar10 --optimizer adamw --epochs 15 \
                  incompatible with static graph tracing); falls back to eager on failure
 --resume PATH    resume training from a .pt checkpoint (restores model weights and optimizer
                  state; continues from the next epoch)
+--ema-decay      exponential moving average decay for model weights (e.g. 0.999); EMA weights
+                 are evaluated each epoch alongside raw weights; None = disabled (default)
 ```
 
 ### 4. Run the interactive benchmark
@@ -287,6 +289,8 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --save-grad-heatmap path for per-layer gradient flow heatmap (default: plots/grad_flow.png; '' to disable)
 --save-opt-states   path for optimizer internal state figure (default: plots/opt_states.png; '' to disable)
 --save-frontier     path for efficiency frontier plot (default: plots/efficiency_frontier.png; '' to disable)
+--ema-decay      exponential moving average decay for model weights (e.g. 0.999); EMA weights are
+                 evaluated each epoch alongside raw weights; None = disabled (default)
 --checkpoint-dir    directory for per-run checkpoints
 --report-path       save path for the Markdown benchmark report (default: reports/benchmark_report.md)
 ```
@@ -371,7 +375,23 @@ Only optimizers with tracked state produce output. SGD, vanilla SGD, and others 
 
 If `torch.compile` fails for any other reason (e.g. unsupported ops or platform restrictions), training falls back to eager mode with a warning — no crash.
 
-### 12. Resume from checkpoint (`--resume`)
+### 12. EMA weights (`--ema-decay`)
+
+`--ema-decay DECAY` activates Exponential Moving Average (EMA) weight tracking. After every optimizer step, a shadow copy of the model weights is updated:
+
+```
+ema_weights = decay × ema_weights + (1 − decay) × current_weights
+```
+
+At the end of each epoch, the model is temporarily switched to its EMA weights, evaluated on the test set, then restored. The result is appended to `history["test_acc_ema"]`.
+
+Typical values: `0.999` (slow EMA, very smooth), `0.9` (fast EMA, less lag). The EMA curve is drawn as a dashed line on the Test Accuracy panel in `plot_benchmark()`. The benchmark report gains `EMA Acc (%)` and `EMA Gap (pp)` columns when EMA data is present.
+
+**Implementation detail:** `model.state_dict()` returns detached *views* sharing the model's parameter storage — not independent clones. The EMA swap code explicitly clones each tensor before loading EMA weights, ensuring the original state is preserved exactly for restoration.
+
+Disabled by default (`None`); fully backward-compatible.
+
+### 13. Resume from checkpoint (`--resume`)
 
 `--resume PATH` loads a `.pt` checkpoint saved by a previous run and continues training from where it left off:
 

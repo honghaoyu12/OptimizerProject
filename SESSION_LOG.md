@@ -556,6 +556,26 @@ Total tests: 303 (up from 299). CI green on `main`.
 
 ---
 
+## Session 33 — EMA Weights (`--ema-decay`)
+
+**What we discussed:**
+- EMA weights as a training regulariser: maintain a shadow copy of model weights updated as `ema = decay × ema + (1−decay) × current` after each optimizer step; evaluate with EMA weights each epoch for a potentially more stable accuracy estimate
+- Key subtlety: must EMA the full `state_dict()` float tensors (not just `parameters()`) to handle BatchNorm running stats in ResNet-18
+- Found and fixed a critical bug: `model.state_dict()` returns detached **views** sharing parameter storage, not independent clones. Using a bare `state_dict()` capture before swapping weights meant the "saved original" was silently overwritten when EMA weights were loaded, making the restoration a no-op. Fixed by explicit `.clone()` of every tensor.
+
+**What was built:**
+- `train.py`: `train_one_epoch(ema_state, ema_decay)` — in-place EMA update after every optimizer step; `run_training(ema_decay)` — initialises EMA state, swap-evaluate-restore pattern per epoch with cloned `orig_state`, `history["test_acc_ema"]`; `main()` — EMA state management, `--ema-decay` CLI flag.
+- `benchmark.py`: `"test_acc_ema"` added to `_aggregate_histories()` list_keys; `run_benchmark(ema_decay)` param; `--ema-decay` CLI flag.
+- `visualizer.py`: `plot_benchmark()` — dashed EMA line on Test Accuracy panel when `test_acc_ema` is non-empty.
+- `report.py`: Results table — conditional `EMA Acc (%)` and `EMA Gap (pp)` columns when any run has EMA data.
+- `tests/test_train.py`: `TestEMA` (4 tests).
+- `tests/test_visualizer.py`: `TestEMAPlot` (3 tests).
+- `tests/test_report.py`: 2 new EMA column tests.
+
+Total tests: **356** (up from 347).
+
+---
+
 ## Session 32 — LR Sensitivity Score
 
 **What we discussed:**

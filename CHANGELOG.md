@@ -4,6 +4,44 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 29 — EMA Weights (`--ema-decay`)
+
+### `train.py`
+
+- **`train_one_epoch(ema_state, ema_decay)`** — two new keyword parameters. After every optimizer step, EMA shadow weights are updated in-place: `ema[k] = decay × ema[k] + (1−decay) × param[k]`. Works with both AMP and non-AMP paths.
+- **`run_training(ema_decay)`** — new optional parameter (`None` = disabled). When set, initialises a `ema_state` dict of float-tensor clones from the initial model state. After each epoch's raw evaluation, temporarily swaps EMA weights into the model (using explicit `.clone()` for `orig_state` — critical fix: `state_dict()` returns detached views sharing parameter storage, so a bare `state_dict()` capture would be corrupted by subsequent `load_state_dict()`), evaluates, then restores the original weights exactly. Appends EMA accuracy to `history["test_acc_ema"]`. When `ema_decay=None`, `history["test_acc_ema"]` remains an empty list (fully backward-compatible).
+- **`main()`** — EMA state initialised and passed to `train_one_epoch`; same swap-evaluate-restore pattern for the per-epoch EMA evaluation; `--ema-decay` banner printed when set; `test_acc_ema` key in history.
+- **`--ema-decay`** CLI flag (default `None`) added to `parse_args()`.
+
+### `benchmark.py`
+
+- **`_aggregate_histories()`** — `"test_acc_ema"` added to `list_keys`; correctly averaged across seeds like other per-epoch lists.
+- **`run_benchmark(ema_decay)`** — new optional parameter; passed through to `run_training()`.
+- **`main()`** — `ema_decay=args.ema_decay` passed to `run_benchmark()`; EMA banner printed when set.
+- **`--ema-decay`** CLI flag added to `parse_args()`.
+
+### `visualizer.py`
+
+- **`plot_benchmark()`** — when `history["test_acc_ema"]` is non-empty for a series, a dashed line (`"--"`, 70% opacity) is drawn on the Test Accuracy panel, labelled `"<optimizer> (EMA)"`. Error bands are unchanged (solid only). Backward-compatible: no change when `test_acc_ema` is absent.
+
+### `report.py`
+
+- **Results Overview table** — when any run in a (dataset, model) group has `test_acc_ema` data, two extra columns are appended: `EMA Acc (%)` (final EMA accuracy) and `EMA Gap (pp)` (EMA − raw, signed with `+`/`−`). Absent when no EMA data is present (backward-compatible).
+
+### Bug fix
+
+- **`state_dict()` view-sharing** — `model.state_dict()` returns tensors that are detached **views** of the model's actual parameter storage, not independent clones. Calling `load_state_dict()` to install EMA weights would silently overwrite the "saved" original state, making the restoration a no-op. Fixed by using `{k: v.clone() for k, v in model.state_dict().items()}` for the pre-swap snapshot in both `run_training()` and `main()`.
+
+### Tests
+
+- `tests/test_train.py`: **`TestEMA`** (4 tests) — disabled → empty list; enabled → one entry per epoch; values finite; model weights fully restored after EMA eval.
+- `tests/test_visualizer.py`: **`TestEMAPlot`** (3 tests) — EMA data → no error; file saved; no EMA data → backward-compatible.
+- `tests/test_report.py`: 2 new tests — EMA columns present when data exists; absent without data.
+
+Total tests: **356** (up from 347).
+
+---
+
 ## Round 28 — LR Sensitivity Score
 
 ### `visualizer.py`

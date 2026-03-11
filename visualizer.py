@@ -344,6 +344,14 @@ def plot_benchmark(
                     if tae is not None:
                         ax.axvline(x=tae, color=color, linestyle=":", linewidth=1.2, alpha=0.7)
 
+                    ema_vals = history.get("test_acc_ema", [])
+                    if ema_vals:
+                        ema_pct = [v * 100 for v in ema_vals]
+                        ema_epochs = list(range(1, len(ema_pct) + 1))
+                        ax.plot(ema_epochs, ema_pct, "--",
+                                color=color, linewidth=1.2, alpha=0.7,
+                                label=f"{opt_name} (EMA)")
+
             ax.legend(fontsize=7)
             ax.tick_params(labelsize=7)
 

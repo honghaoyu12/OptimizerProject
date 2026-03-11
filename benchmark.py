@@ -248,6 +248,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
     list_keys = [
         "train_loss", "test_loss", "train_acc", "test_acc", "learning_rates",
         "grad_norm_global", "grad_norm_before_clip", "grad_norm_std", "time_elapsed",
+        "test_acc_ema",
     ]
     for key in list_keys:
         vals = [h.get(key) or [] for h in histories]
@@ -354,6 +355,7 @@ def run_benchmark(
     target_acc: float = 0.95,
     amp: bool = False,
     compile_model: bool = False,
+    ema_decay: float | None = None,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -464,6 +466,7 @@ def run_benchmark(
                                 checkpoint_dir=run_ckpt_dir,
                                 checkpoint_config=run_cfg,
                                 amp=amp,
+                                ema_decay=ema_decay,
                             )
                             seed_histories.append(history)
 
@@ -550,6 +553,10 @@ def parse_args():
                    help="Path to save optimizer internal state figure ('' to disable)")
     p.add_argument("--save-frontier", default="plots/efficiency_frontier.png",
                    help="Path to save efficiency frontier plot ('' to disable)")
+    p.add_argument("--ema-decay", default=None, type=float,
+                   help="Exponential moving average decay for model weights "
+                        "(e.g. 0.999). EMA weights are evaluated each epoch alongside "
+                        "raw weights. None = disabled (default).")
     return p.parse_args()
 
 
@@ -567,6 +574,8 @@ def main():
         print(f"  AMP            : enabled (auto-disabled per-run for Sophia/AdaHessian)")
     if args.compile:
         print(f"  torch.compile  : enabled (auto-disabled per-run for Sophia/AdaHessian)")
+    if args.ema_decay is not None:
+        print(f"  EMA decay      : {args.ema_decay}")
     if args.lrs is not None and len(args.lrs) == 1:
         print(f"  LR (global)  : {args.lrs[0]}")
     elif args.lrs is not None:
@@ -629,6 +638,7 @@ def main():
         target_acc=args.target_acc,
         amp=args.amp,
         compile_model=args.compile,
+        ema_decay=args.ema_decay,
     )
     logger.close()
 

@@ -488,6 +488,8 @@ def train_one_epoch(
     max_grad_norm: float | None = None,
     amp: bool = False,
     scaler=None,
+    ema_state: dict | None = None,
+    ema_decay: float = 0.999,
 ) -> dict:
     """Run one training epoch.
 
@@ -571,6 +573,13 @@ def train_one_epoch(
         else:
             optimizer.step()
 
+        # EMA weight update (after every optimizer step)
+        if ema_state is not None:
+            with torch.no_grad():
+                for k, v in model.state_dict().items():
+                    if k in ema_state:
+                        ema_state[k].mul_(ema_decay).add_(v, alpha=1.0 - ema_decay)
+
         total_loss += loss.item() * images.size(0)
         correct += (logits.argmax(dim=1) == labels).sum().item()
         step_losses.append(loss.item())
@@ -626,6 +635,7 @@ def run_training(
     checkpoint_config: dict | None = None,
     amp: bool = False,
     resume_from: str | None = None,
+    ema_decay: float | None = None,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -690,7 +700,14 @@ def run_training(
         "learning_rates": [],
         "early_stopped_epoch": None,
         "optimizer_states": {},
+        "test_acc_ema": [],
     }
+
+    # Initialise EMA state (float tensors only; updated in-place each batch)
+    ema_state: dict | None = None
+    if ema_decay is not None:
+        ema_state = {k: v.clone() for k, v in model.state_dict().items()
+                     if v.is_floating_point()}
 
     es = EarlyStopping(patience, min_delta)
     best_test_acc: float = -1.0
@@ -730,12 +747,25 @@ def run_training(
             max_grad_norm=max_grad_norm,
             amp=amp,
             scaler=scaler,
+            ema_state=ema_state,
+            ema_decay=ema_decay if ema_decay is not None else 0.999,
         )
         global_step_offset += len(epoch_result["step_losses"])
 
         train_loss = epoch_result["loss"]
         train_acc  = epoch_result["acc"]
         test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+
+        # EMA evaluation: temporarily swap EMA weights in, evaluate, restore.
+        # state_dict() returns detached views sharing parameter storage, so we
+        # must clone explicitly to preserve the originals before loading EMA weights.
+        if ema_state is not None:
+            orig_state = {k: v.clone() for k, v in model.state_dict().items()}
+            model.load_state_dict({**orig_state, **ema_state})
+            _, ema_acc = evaluate(model, test_loader, criterion, device)
+            model.load_state_dict(orig_state)
+            history["test_acc_ema"].append(ema_acc)
+
         w_norms = weight_norms(model, layer_names)
         elapsed = time.time() - start_time
 
@@ -885,6 +915,10 @@ def parse_args():
                    help="Path to a checkpoint (.pt) to resume training from. "
                         "Restores model weights, optimizer state, and continues from the "
                         "next epoch.")
+    p.add_argument("--ema-decay", default=None, type=float,
+                   help="Exponential moving average decay for model weights "
+                        "(e.g. 0.999). EMA weights are evaluated each epoch alongside "
+                        "raw weights. None = disabled (default).")
     return p.parse_args()
 
 
@@ -930,6 +964,8 @@ def main():
         print(f"Weight decay  : {args.weight_decay:g}")
     if args.seed is not None:
         print(f"Seed          : {args.seed}")
+    if args.ema_decay is not None:
+        print(f"EMA decay     : {args.ema_decay}")
     if args.checkpoint_dir:
         print(f"Checkpoints   : {args.checkpoint_dir}/")
 
@@ -1005,7 +1041,15 @@ def main():
         "time_elapsed": [], "step_losses": [],
         "learning_rates": [],
         "early_stopped_epoch": None,
+        "test_acc_ema": [],
     }
+
+    # Initialise EMA shadow weights (float tensors only)
+    ema_state: dict | None = None
+    if args.ema_decay is not None:
+        ema_state = {k: v.clone() for k, v in model.state_dict().items()
+                     if v.is_floating_point()}
+
     es = EarlyStopping(args.patience, args.min_delta)
     best_test_acc: float = -1.0
     if args.checkpoint_dir:
@@ -1040,10 +1084,22 @@ def main():
             max_grad_norm=args.max_grad_norm,
             amp=amp,
             scaler=scaler,
+            ema_state=ema_state,
+            ema_decay=args.ema_decay if args.ema_decay is not None else 0.999,
         )
         train_loss = epoch_result["loss"]
         train_acc  = epoch_result["acc"]
         test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+
+        # EMA evaluation: temporarily swap EMA weights in, evaluate, restore.
+        # state_dict() returns detached views sharing parameter storage, so we
+        # must clone explicitly to preserve the originals before loading EMA weights.
+        if ema_state is not None:
+            orig_state = {k: v.clone() for k, v in model.state_dict().items()}
+            model.load_state_dict({**orig_state, **ema_state})
+            _, ema_acc = evaluate(model, test_loader, criterion, device)
+            model.load_state_dict(orig_state)
+            history["test_acc_ema"].append(ema_acc)
         w_norms = weight_norms(model, layer_names)
 
         ht = float("nan")

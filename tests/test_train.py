@@ -813,3 +813,59 @@ class TestOptimizerStates:
         opt = torch.optim.SGD(model.parameters(), lr=1e-2)
         history = run_training(model, tl, vl, opt, crit, dev, 1, ln, verbose=False)
         assert history["optimizer_states"] == {}
+
+
+# ---------------------------------------------------------------------------
+# EMA weights
+# ---------------------------------------------------------------------------
+
+class TestEMA:
+    """Tests for ema_decay in run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_ema_disabled_produces_empty_list(self):
+        """Without ema_decay, history['test_acc_ema'] is empty."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert history["test_acc_ema"] == []
+
+    def test_ema_enabled_has_one_entry_per_epoch(self):
+        """With ema_decay, history['test_acc_ema'] has one float per epoch."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False,
+                               ema_decay=0.9)
+        assert len(history["test_acc_ema"]) == 2
+        for v in history["test_acc_ema"]:
+            assert 0.0 <= v <= 1.0
+
+    def test_ema_values_are_finite(self):
+        """EMA accuracy values are finite floats, not NaN or inf."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln, verbose=False,
+                               ema_decay=0.999)
+        import math
+        for v in history["test_acc_ema"]:
+            assert math.isfinite(v)
+
+    def test_ema_does_not_corrupt_model_weights(self):
+        """EMA evaluation swaps weights temporarily; model is fully restored afterward."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False,
+                               ema_decay=0.9)
+
+        # Re-evaluate the model with its current weights; must match the recorded test_acc
+        _, final_acc = evaluate(model, vl, crit, dev)
+        assert abs(final_acc - history["test_acc"][-1]) < 1e-6
