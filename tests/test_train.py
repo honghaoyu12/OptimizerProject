@@ -568,6 +568,74 @@ class TestWeightDecay:
 
 
 # ---------------------------------------------------------------------------
+# Label smoothing
+# ---------------------------------------------------------------------------
+
+class TestLabelSmoothing:
+    """Tests for label_smoothing in CrossEntropyLoss via train_one_epoch / run_training."""
+
+    def _make_components(self, label_smoothing=0.0):
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16]).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10)
+        layer_names = linear_layer_names(model)
+        return model, loader, optimizer, criterion, device, layer_names
+
+    def test_label_smoothing_zero_runs(self):
+        """label_smoothing=0.0 (default) completes without error."""
+        model, loader, opt, crit, dev, ln = self._make_components(0.0)
+        result = train_one_epoch(model, loader, opt, crit, dev, ln)
+        assert result["loss"] > 0.0
+
+    def test_label_smoothing_nonzero_runs(self):
+        """label_smoothing=0.1 completes without error and returns finite loss."""
+        model, loader, opt, crit, dev, ln = self._make_components(0.1)
+        result = train_one_epoch(model, loader, opt, crit, dev, ln)
+        import math
+        assert math.isfinite(result["loss"])
+        assert result["loss"] > 0.0
+
+    def test_label_smoothing_raises_loss_floor(self):
+        """With smoothing=0.1, minimum achievable loss is higher than with smoothing=0."""
+        # With 10 classes and smoothing ε, the minimum CE loss = -log(1 - ε + ε/C).
+        # After many steps from the same init, the smoothed run should have higher loss.
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        tl, vl = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+
+        def _run(smoothing):
+            torch.manual_seed(0)
+            m = build_model("mlp", ds_info, [64])
+            opt = torch.optim.Adam(m.parameters(), lr=1e-2)
+            crit = torch.nn.CrossEntropyLoss(label_smoothing=smoothing)
+            ln = linear_layer_names(m)
+            history = run_training(m, tl, vl, opt, crit, torch.device("cpu"),
+                                   5, ln, verbose=False)
+            return min(history["train_loss"])
+
+        loss_no_smooth = _run(0.0)
+        loss_smoothed  = _run(0.1)
+        assert loss_smoothed > loss_no_smooth
+
+    def test_label_smoothing_in_run_training(self):
+        """run_training with a smoothed criterion runs to completion."""
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        tl, vl = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        model = build_model("mlp", ds_info, [32])
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        crit = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
+        ln = linear_layer_names(model)
+        history = run_training(model, tl, vl, opt, crit, torch.device("cpu"),
+                               2, ln, verbose=False)
+        assert len(history["train_loss"]) == 2
+        assert all(v > 0 for v in history["train_loss"])
+
+
+# ---------------------------------------------------------------------------
 # Seed / reproducibility
 # ---------------------------------------------------------------------------
 

@@ -64,19 +64,21 @@ def generate_report(
     models     = sorted({k[1] for k in results})
     optimizers = sorted({k[2] for k in results})
 
-    epochs      = config.get("epochs", "N/A")
-    batch_size  = config.get("batch_size", "N/A")
-    scheduler   = config.get("scheduler", "N/A")
-    wds         = config.get("weight_decays", [0.0])
-    lrs         = config.get("lrs", None)
-    seed        = config.get("seed", None)
-    num_seeds   = config.get("num_seeds", 1)
-    target_acc  = config.get("target_acc", 0.95)
-    target_pct  = int(round(target_acc * 100))
+    epochs           = config.get("epochs", "N/A")
+    batch_size       = config.get("batch_size", "N/A")
+    scheduler        = config.get("scheduler", "N/A")
+    wds              = config.get("weight_decays", [0.0])
+    lrs              = config.get("lrs", None)
+    seed             = config.get("seed", None)
+    num_seeds        = config.get("num_seeds", 1)
+    target_acc       = config.get("target_acc", 0.95)
+    label_smoothing  = config.get("label_smoothing", 0.0)
+    target_pct       = int(round(target_acc * 100))
 
     wd_str   = ", ".join(str(w) for w in (wds or [0.0]))
     lr_str   = ", ".join(str(l) for l in lrs) if lrs else "per-optimizer defaults"
     seed_str = f"{num_seeds} (averaged)" if num_seeds > 1 else "1 (single run)"
+    ls_str   = str(label_smoothing) if label_smoothing > 0.0 else "0.0 (disabled)"
 
     lines += [
         "## Setup",
@@ -91,6 +93,7 @@ def generate_report(
         f"| Scheduler | {scheduler} |",
         f"| Weight decays | {wd_str} |",
         f"| LRs | {lr_str} |",
+        f"| Label smoothing | {ls_str} |",
         f"| Seed | {seed} |",
         f"| Seeds | {seed_str} |",
         f"| Target acc | {target_pct}% |",

@@ -4,6 +4,32 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 31 — Label Smoothing (`--label-smoothing`)
+
+### `train.py`
+
+- `criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)` — single-line change; value flows from the new `--label-smoothing` flag.
+- `--label-smoothing` CLI flag (default: `0.0`). Banner printed when `> 0.0`.
+- `label_smoothing` added to the per-run log config dict.
+
+### `benchmark.py`
+
+- `run_benchmark(label_smoothing=0.0)` — new parameter; passed to `nn.CrossEntropyLoss`.
+- `--label-smoothing` CLI flag; banner; added to `report_cfg`.
+
+### `report.py`
+
+- Setup table gains a **Label smoothing** row. Shows the epsilon value when non-zero, `"0.0 (disabled)"` when zero (always present for transparency).
+
+### Tests
+
+- `tests/test_train.py`: **`TestLabelSmoothing`** (4 tests) — zero runs; non-zero runs + finite loss; smoothing raises the loss floor vs no-smoothing; full `run_training` integration.
+- `tests/test_report.py`: 2 new tests — row present with value when `label_smoothing=0.1`; row shows `"disabled"` when `0.0`.
+
+Total tests: **366** (up from 360).
+
+---
+
 ## Round 30 — Cosine Annealing with Warm Restarts (`cosine_wr`)
 
 ### `train.py`

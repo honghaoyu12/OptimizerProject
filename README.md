@@ -197,6 +197,7 @@ python train.py --model vit --dataset cifar10 --optimizer adamw --epochs 15 \
                  state; continues from the next epoch)
 --ema-decay      exponential moving average decay for model weights (e.g. 0.999); EMA weights
                  are evaluated each epoch alongside raw weights; None = disabled (default)
+--label-smoothing label smoothing epsilon for CrossEntropyLoss (default: 0.0); typical value 0.1
 ```
 
 ### 4. Run the interactive benchmark
@@ -291,6 +292,7 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --save-frontier     path for efficiency frontier plot (default: plots/efficiency_frontier.png; '' to disable)
 --ema-decay      exponential moving average decay for model weights (e.g. 0.999); EMA weights are
                  evaluated each epoch alongside raw weights; None = disabled (default)
+--label-smoothing label smoothing epsilon for CrossEntropyLoss (default: 0.0); typical value 0.1
 --checkpoint-dir    directory for per-run checkpoints
 --report-path       save path for the Markdown benchmark report (default: reports/benchmark_report.md)
 ```

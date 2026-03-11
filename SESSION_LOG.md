@@ -556,6 +556,23 @@ Total tests: 303 (up from 299). CI green on `main`.
 
 ---
 
+## Session 35 — Label Smoothing (`--label-smoothing`)
+
+**What we discussed:**
+- Minimal-effort regulariser: one-line change to CrossEntropyLoss; interesting to benchmark because it interacts differently with Adam (often minimal effect) vs SGD (can be meaningful)
+- Pass epsilon straight through to `nn.CrossEntropyLoss(label_smoothing=ε)` — no training-loop changes needed
+
+**What was built:**
+- `train.py`: `--label-smoothing` flag → criterion; banner; log config
+- `benchmark.py`: `run_benchmark(label_smoothing=)` param; `--label-smoothing` flag; report config
+- `report.py`: Label smoothing row in Setup table (always shown; "disabled" when 0.0)
+- `tests/test_train.py`: `TestLabelSmoothing` (4 tests)
+- `tests/test_report.py`: 2 new tests
+
+Total tests: **366** (up from 360).
+
+---
+
 ## Session 34 — Cosine Annealing with Warm Restarts (`cosine_wr`)
 
 **What we discussed:**

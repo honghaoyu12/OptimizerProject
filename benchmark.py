@@ -356,6 +356,7 @@ def run_benchmark(
     amp: bool = False,
     compile_model: bool = False,
     ema_decay: float | None = None,
+    label_smoothing: float = 0.0,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -374,7 +375,7 @@ def run_benchmark(
     _COMPILE_INCOMPATIBLE_NAMES = {"sophia", "adahessian"}
 
     results: dict = {}
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     sweep_lr = lrs is not None and len(lrs) > 1
     sweep_wd = len(weight_decays) > 1
     n_lr_vals = len(lrs) if lrs is not None else 1
@@ -557,6 +558,9 @@ def parse_args():
                    help="Exponential moving average decay for model weights "
                         "(e.g. 0.999). EMA weights are evaluated each epoch alongside "
                         "raw weights. None = disabled (default).")
+    p.add_argument("--label-smoothing", default=0.0, type=float,
+                   help="Label smoothing epsilon for CrossEntropyLoss (default: 0.0 = disabled). "
+                        "Typical value: 0.1.")
     return p.parse_args()
 
 
@@ -576,6 +580,8 @@ def main():
         print(f"  torch.compile  : enabled (auto-disabled per-run for Sophia/AdaHessian)")
     if args.ema_decay is not None:
         print(f"  EMA decay      : {args.ema_decay}")
+    if args.label_smoothing > 0.0:
+        print(f"  Label smoothing: {args.label_smoothing}")
     if args.lrs is not None and len(args.lrs) == 1:
         print(f"  LR (global)  : {args.lrs[0]}")
     elif args.lrs is not None:
@@ -639,6 +645,7 @@ def main():
         amp=args.amp,
         compile_model=args.compile,
         ema_decay=args.ema_decay,
+        label_smoothing=args.label_smoothing,
     )
     logger.close()
 
@@ -677,6 +684,7 @@ def main():
             "seed": args.seed,
             "num_seeds": args.num_seeds,
             "target_acc": args.target_acc,
+            "label_smoothing": args.label_smoothing,
         }
         generate_report(results, report_cfg, save_path=args.report_path)
         print(f"\n  Report saved to {args.report_path}")

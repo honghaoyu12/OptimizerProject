@@ -924,6 +924,9 @@ def parse_args():
                    help="Exponential moving average decay for model weights "
                         "(e.g. 0.999). EMA weights are evaluated each epoch alongside "
                         "raw weights. None = disabled (default).")
+    p.add_argument("--label-smoothing", default=0.0, type=float,
+                   help="Label smoothing epsilon for CrossEntropyLoss (default: 0.0 = disabled). "
+                        "Typical value: 0.1.")
     return p.parse_args()
 
 
@@ -957,7 +960,7 @@ def main():
     # Components
     train_loader, test_loader = get_dataloaders(args.dataset, args.batch_size, args.data_dir)
     optimizer = build_optimizer(args.optimizer, model, args.lr, args.weight_decay)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     scheduler = SCHEDULER_REGISTRY[args.scheduler](optimizer, args.epochs, args.warmup_epochs)
     print(f"Optimizer    : {optimizer.__class__.__name__}  (lr={args.lr})")
     print(f"Scheduler    : {args.scheduler}")
@@ -971,6 +974,8 @@ def main():
         print(f"Seed          : {args.seed}")
     if args.ema_decay is not None:
         print(f"EMA decay     : {args.ema_decay}")
+    if args.label_smoothing > 0.0:
+        print(f"Label smoothing: {args.label_smoothing}")
     if args.checkpoint_dir:
         print(f"Checkpoints   : {args.checkpoint_dir}/")
 
@@ -1186,9 +1191,10 @@ def main():
         "scheduler":     args.scheduler,
         "patience":      args.patience,
         "min_delta":     args.min_delta,
-        "max_grad_norm": args.max_grad_norm,
-        "weight_decay":  args.weight_decay,
-        "seed":          args.seed,
+        "max_grad_norm":    args.max_grad_norm,
+        "weight_decay":     args.weight_decay,
+        "seed":             args.seed,
+        "label_smoothing":  args.label_smoothing,
     }
     logger = TrainingLogger(log_dir=args.log_dir)
     logger.log_run(config, history)

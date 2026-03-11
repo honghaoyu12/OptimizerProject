@@ -178,3 +178,20 @@ def test_report_ema_columns_absent_without_ema_data():
     out = generate_report(results, _DEFAULT_CONFIG, save_path="")
     assert "EMA Acc" not in out
     assert "EMA Gap" not in out
+
+
+def test_report_label_smoothing_row_present():
+    """config with label_smoothing key → 'Label smoothing' row appears in Setup."""
+    results = _make_results()
+    cfg = {**_DEFAULT_CONFIG, "label_smoothing": 0.1}
+    out = generate_report(results, cfg, save_path="")
+    assert "Label smoothing" in out
+    assert "0.1" in out
+
+
+def test_report_label_smoothing_disabled_row():
+    """config with label_smoothing=0.0 → row shows '0.0 (disabled)'."""
+    results = _make_results()
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "Label smoothing" in out
+    assert "disabled" in out
