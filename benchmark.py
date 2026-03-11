@@ -26,7 +26,8 @@ from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
 from report import generate_report
-from visualizer import plot_benchmark, plot_lr_sensitivity, plot_grad_flow_heatmap, plot_optimizer_states
+from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_grad_flow_heatmap,
+                        plot_optimizer_states, plot_efficiency_frontier)
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +545,8 @@ def parse_args():
                    help="Path to save per-layer gradient flow heatmap ('' to disable)")
     p.add_argument("--save-opt-states", default="plots/opt_states.png",
                    help="Path to save optimizer internal state figure ('' to disable)")
+    p.add_argument("--save-frontier", default="plots/efficiency_frontier.png",
+                   help="Path to save efficiency frontier plot ('' to disable)")
     return p.parse_args()
 
 
@@ -641,6 +644,10 @@ def main():
     # ── Optimizer State Plot ───────────────────────────────────────────────
     if args.save_opt_states:
         plot_optimizer_states(results, save_path=args.save_opt_states)
+
+    # ── Efficiency Frontier ────────────────────────────────────────────────
+    if args.save_frontier:
+        plot_efficiency_frontier(results, save_path=args.save_frontier)
 
     # ── Report ────────────────────────────────────────────────────────────
     if args.report_path:

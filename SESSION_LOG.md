@@ -556,6 +556,22 @@ Total tests: 303 (up from 299). CI green on `main`.
 
 ---
 
+## Session 31 — Efficiency Frontier Plot
+
+**What we discussed:**
+- Data already exists (`time_elapsed[-1]`, `test_acc[-1]`) — zero training overhead
+- Pareto frontier highlights the optimal accuracy/time tradeoffs
+- Most actionable of the suggested features: directly answers "which optimizer should I use?"
+
+**What was built:**
+- `visualizer.py`: `_pareto_frontier()` helper (returns Pareto-optimal subset sorted by time); `plot_efficiency_frontier()` — scatter plot with labelled points, dashed Pareto step line, optional error bars, multi-subplot grid for multiple (dataset, model) combos; skips with message when no time data
+- `benchmark.py`: `--save-frontier` flag (default `plots/efficiency_frontier.png`); import + `main()` call
+- `tests/test_visualizer.py`: 11 new tests — `TestParetoFrontier` (5 unit tests of the algorithm) + `TestEfficiencyFrontier` (6 integration tests)
+
+Total tests: 336 (up from 325). CI green on `main`.
+
+---
+
 ## Session 30 — Optimizer Internal State Plot
 
 **What we discussed:**
@@ -633,9 +649,10 @@ Total tests: 308 (up from 303). CI green on `main`.
 | Resume from checkpoint | `--resume PATH` in `train.py`; `resume_from=PATH` in `run_training()` — restores model+optimizer state |
 | Gradient flow heatmap | `plot_grad_flow_heatmap()` in `visualizer.py`; `--save-grad-heatmap` in `benchmark.py`; x=epoch, y=layer, colour=log₁₀\|grad\| |
 | Optimizer state plot | `plot_optimizer_states()` in `visualizer.py`; `--save-opt-states` in `benchmark.py`; exp_avg_sq/exp_avg/hessian heatmaps + Prodigy d line |
+| Efficiency frontier | `plot_efficiency_frontier()` in `visualizer.py`; `--save-frontier` in `benchmark.py`; Pareto-optimal accuracy vs time scatter |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 325 passing |
+| Tests | 336 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

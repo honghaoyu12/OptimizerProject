@@ -4,6 +4,28 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 27 — Efficiency Frontier Plot
+
+### `visualizer.py`
+
+- **`_pareto_frontier(points)`** — helper that takes a list of `(time, acc, label)` tuples and returns the Pareto-optimal subset (sorted by time ascending). A point is on the frontier if no alternative is both faster *and* more accurate.
+- **`plot_efficiency_frontier(results, save_path)`** — scatter plot of final test accuracy (%) vs wall-clock training time (s), one labelled point per optimizer series. The Pareto frontier is drawn as a dashed step line. Error bars shown when `test_acc_std` is present. One subplot per (dataset, model) combination; layout adapts to 2-column grid for multiple combos. Silently skips when no `time_elapsed` data is found.
+
+### `benchmark.py`
+
+- **`--save-frontier`** flag (default: `plots/efficiency_frontier.png`, `''` disables). Generated after every benchmark run.
+- Import and `main()` call added.
+
+### `tests/test_visualizer.py`
+
+Eleven new tests:
+- `TestParetoFrontier` (5): single point, dominated point excluded, both-on-frontier tradeoff, dominated middle excluded, sorted-by-time output.
+- `TestEfficiencyFrontier` (6): runs without error, file saved, skips on missing data, single optimizer, std error bars, multi-(dataset, model) subplots.
+
+Total tests: 336 (up from 325).
+
+---
+
 ## Round 26 — Optimizer Internal State Plot
 
 ### `train.py`

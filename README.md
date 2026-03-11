@@ -285,6 +285,7 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --save-lr-plot      path for LR sensitivity figure (default: plots/lr_sensitivity.png; only generated when --lrs has ≥2 values)
 --save-grad-heatmap path for per-layer gradient flow heatmap (default: plots/grad_flow.png; '' to disable)
 --save-opt-states   path for optimizer internal state figure (default: plots/opt_states.png; '' to disable)
+--save-frontier     path for efficiency frontier plot (default: plots/efficiency_frontier.png; '' to disable)
 --checkpoint-dir    directory for per-run checkpoints
 --report-path       save path for the Markdown benchmark report (default: reports/benchmark_report.md)
 ```
@@ -337,7 +338,16 @@ One subplot per (dataset, model, optimizer) combination. At a glance you can see
 
 The data comes directly from `history["grad_norms"]` already collected by `run_training()` — no additional training overhead.
 
-### 9. Optimizer internal state plot (`--save-opt-states`)
+### 9. Efficiency frontier (`--save-frontier`)
+
+After every benchmark run, an efficiency frontier plot is saved to `plots/efficiency_frontier.png` (disable with `--save-frontier ""`). It answers directly: *which optimizer gives the best accuracy for a given time budget?*
+
+- Each point is one optimizer, plotted at **(training time, final test accuracy)**
+- The **Pareto frontier** (dashed step line) connects the optimal trade-offs — points where no alternative is both faster *and* more accurate
+- Error bars appear when `--num-seeds > 1`
+- One subplot per (dataset, model) combination
+
+### 10. Optimizer internal state plot (`--save-opt-states`)
 
 After every benchmark run, an optimizer state figure is saved to `plots/opt_states.png` (disable with `--save-opt-states ""`). Each subplot shows how an optimizer's internal buffers evolve over training:
 
@@ -352,7 +362,7 @@ For heatmaps: x=epoch, y=layer (input at bottom), colour=log₁₀ of mean absol
 
 Only optimizers with tracked state produce output. SGD, vanilla SGD, and others with no momentum or second-moment buffers are silently skipped.
 
-### 10. `torch.compile` (`--compile`)
+### 11. `torch.compile` (`--compile`)
 
 `--compile` calls `torch.compile(model)` before training, enabling PyTorch 2.x's kernel fusion and graph optimization. Expected speedup is ~20–40% on CUDA or MPS; there is no benefit on CPU.
 
@@ -360,7 +370,7 @@ Only optimizers with tracked state produce output. SGD, vanilla SGD, and others 
 
 If `torch.compile` fails for any other reason (e.g. unsupported ops or platform restrictions), training falls back to eager mode with a warning — no crash.
 
-### 11. Resume from checkpoint (`--resume`)
+### 12. Resume from checkpoint (`--resume`)
 
 `--resume PATH` loads a `.pt` checkpoint saved by a previous run and continues training from where it left off:
 
@@ -376,7 +386,7 @@ The checkpoint contains `epoch`, `model_state_dict`, `optimizer_state_dict`, `me
 
 `run_training()` also accepts `resume_from=PATH` for programmatic use in notebooks or custom scripts.
 
-### 12. If the live plot window freezes
+### 13. If the live plot window freezes
 
 Some systems don't support interactive matplotlib windows well. Use `--no-plot` to skip it and save to a file instead:
 

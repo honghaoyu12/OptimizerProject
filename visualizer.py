@@ -679,3 +679,133 @@ def plot_optimizer_states(
         print(f"\n  Optimizer state figure saved to {save_path}")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Efficiency frontier plot
+# ---------------------------------------------------------------------------
+
+def _pareto_frontier(points: list[tuple]) -> list[tuple]:
+    """Return the Pareto-optimal subset of (time, acc, label) points.
+
+    A point is on the frontier if no other point is both faster *and* more
+    accurate.  The returned list is sorted by time (ascending).
+    """
+    sorted_pts = sorted(points, key=lambda p: p[0])
+    frontier = []
+    best_acc = -float("inf")
+    for t, acc, label in sorted_pts:
+        if acc > best_acc:
+            frontier.append((t, acc, label))
+            best_acc = acc
+    return frontier
+
+
+def plot_efficiency_frontier(
+    results: dict,
+    save_path: str | None = "plots/efficiency_frontier.png",
+) -> None:
+    """Scatter plot of final test accuracy vs total training time per optimizer.
+
+    Each point represents one optimizer series.  The **Pareto frontier** —
+    the set of runs where no alternative is both faster *and* more accurate —
+    is highlighted with a step line, making it easy to read off the best
+    optimizer for any given time budget.
+
+    One subplot per (dataset, model) combination.  Error bars are drawn when
+    ``test_acc_std`` is present (multi-seed runs).
+
+    Silently skips when no history contains ``time_elapsed`` data.
+
+    Parameters
+    ----------
+    results : {(dataset_name, model_name, series_name): history_dict}
+        Same format as returned by ``run_benchmark()``.
+    save_path : str | None
+        File path to save the figure.  ``None`` or ``''`` disables saving.
+    """
+    valid = {k: v for k, v in results.items()
+             if v.get("time_elapsed") and v.get("test_acc")}
+    if not valid:
+        print("\n  (Efficiency frontier plot skipped: no time_elapsed data in results)")
+        return
+
+    combos = sorted({(k[0], k[1]) for k in valid})
+    n_rows = len(combos)
+
+    fig_w = max(6, 6 * min(n_rows, 2))
+    fig_h = max(5, 5 * math.ceil(n_rows / 2))
+    n_cols = min(n_rows, 2)
+    n_plot_rows = math.ceil(n_rows / n_cols)
+    fig, axes = plt.subplots(n_plot_rows, n_cols,
+                             figsize=(fig_w, fig_h), squeeze=False)
+    fig.suptitle("Efficiency Frontier\n(accuracy vs training time)",
+                 fontsize=13, fontweight="bold")
+
+    # Consistent colour per base optimizer name across subplots
+    all_series = sorted({k[2] for k in valid})
+    cmap = plt.get_cmap("tab20")
+    series_colors = {s: cmap(i % 20 / 20) for i, s in enumerate(all_series)}
+
+    for idx, (ds_name, mdl_name) in enumerate(combos):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row][col]
+
+        points: list[tuple] = []  # (time, acc, label, std)
+        for (d, m, series), hist in valid.items():
+            if d != ds_name or m != mdl_name:
+                continue
+            t = hist["time_elapsed"][-1]
+            acc = hist["test_acc"][-1] * 100
+            std_list = hist.get("test_acc_std", [])
+            std = std_list[-1] * 100 if std_list else float("nan")
+            points.append((t, acc, series, std))
+
+        # Plot each point
+        for t, acc, series, std in points:
+            color = series_colors.get(series, "gray")
+            if not math.isnan(std):
+                ax.errorbar(t, acc, yerr=std, fmt="o", color=color,
+                            capsize=4, markersize=7, linewidth=1.5)
+            else:
+                ax.scatter(t, acc, color=color, s=60, zorder=3)
+            ax.annotate(
+                series,
+                xy=(t, acc),
+                xytext=(5, 3),
+                textcoords="offset points",
+                fontsize=7,
+                color=color,
+            )
+
+        # Pareto frontier
+        frontier = _pareto_frontier([(t, acc, s) for t, acc, s, _ in points])
+        if len(frontier) >= 2:
+            ft, fa, _ = zip(*frontier)
+            # Step line: extend to the right edge for readability
+            max_t = max(t for t, _, _, _ in points)
+            step_t = list(ft) + [max_t]
+            step_a = list(fa) + [fa[-1]]
+            ax.step(step_t, step_a, where="post", color="black",
+                    linewidth=1.2, linestyle="--", alpha=0.5,
+                    label="Pareto frontier")
+            ax.legend(fontsize=7, loc="lower right")
+
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Training time (s)", fontsize=9)
+        ax.set_ylabel("Final test accuracy (%)", fontsize=9)
+        ax.tick_params(labelsize=8)
+
+    # Hide unused subplots
+    for idx in range(len(combos), n_plot_rows * n_cols):
+        row, col = divmod(idx, n_cols)
+        axes[row][col].set_visible(False)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Efficiency frontier saved to {save_path}")
+
+    plt.show()

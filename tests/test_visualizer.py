@@ -4,7 +4,9 @@ import matplotlib
 matplotlib.use("Agg")  # non-interactive backend — must be set before any pyplot import
 
 import pytest
-from visualizer import plot_lr_sensitivity, plot_grad_flow_heatmap, plot_optimizer_states
+from visualizer import (plot_lr_sensitivity, plot_grad_flow_heatmap,
+                        plot_optimizer_states, plot_efficiency_frontier,
+                        _pareto_frontier)
 
 
 # ---------------------------------------------------------------------------
@@ -204,4 +206,105 @@ class TestOptimizerStatePlot:
         results = _make_opt_state_results(series_names=("Adam", "AdamW"))
         out = tmp_path / "opt_multi.png"
         plot_optimizer_states(results, save_path=str(out))
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# plot_efficiency_frontier / _pareto_frontier
+# ---------------------------------------------------------------------------
+
+def _make_frontier_results(series=("Adam", "SGD"), times=(5.0, 10.0),
+                            accs=(0.95, 0.92)):
+    """Minimal results dict with time_elapsed and test_acc."""
+    results = {}
+    for s, t, a in zip(series, times, accs):
+        results[("MNIST", "MLP", s)] = {
+            "test_acc":    [a],
+            "time_elapsed": [t],
+        }
+    return results
+
+
+class TestParetoFrontier:
+    def test_single_point_is_frontier(self):
+        """A single point is always on the frontier."""
+        pts = [(3.0, 0.9, "Adam")]
+        assert _pareto_frontier(pts) == pts
+
+    def test_faster_and_better_dominates(self):
+        """Point A that is both faster and better leaves point B off the frontier."""
+        pts = [(2.0, 0.95, "A"), (5.0, 0.90, "B")]
+        frontier = _pareto_frontier(pts)
+        assert len(frontier) == 1
+        assert frontier[0][2] == "A"
+
+    def test_tradeoff_both_on_frontier(self):
+        """A (fast, lower acc) and B (slow, higher acc) are both Pareto-optimal."""
+        pts = [(2.0, 0.90, "A"), (8.0, 0.96, "B")]
+        frontier = _pareto_frontier(pts)
+        assert len(frontier) == 2
+
+    def test_dominated_point_excluded(self):
+        """Three points; the middle one dominated by the rightmost is excluded."""
+        pts = [(1.0, 0.80, "A"), (3.0, 0.78, "B"), (5.0, 0.95, "C")]
+        frontier = _pareto_frontier(pts)
+        labels = [p[2] for p in frontier]
+        assert "B" not in labels
+        assert "A" in labels and "C" in labels
+
+    def test_sorted_by_time(self):
+        """Frontier is returned sorted by time ascending."""
+        pts = [(10.0, 0.95, "C"), (1.0, 0.80, "A"), (5.0, 0.90, "B")]
+        frontier = _pareto_frontier(pts)
+        times = [p[0] for p in frontier]
+        assert times == sorted(times)
+
+
+class TestEfficiencyFrontier:
+    def test_runs_without_error(self, tmp_path):
+        """plot_efficiency_frontier() completes without raising on valid data."""
+        results = _make_frontier_results()
+        plot_efficiency_frontier(results, save_path=str(tmp_path / "frontier.png"))
+
+    def test_saves_file(self, tmp_path):
+        """Figure file is created at the requested path."""
+        results = _make_frontier_results()
+        out = tmp_path / "frontier.png"
+        plot_efficiency_frontier(results, save_path=str(out))
+        assert out.exists()
+
+    def test_skips_when_no_time_data(self, tmp_path, capsys):
+        """Results without time_elapsed → skip message, no file written."""
+        results = {("MNIST", "MLP", "Adam"): {"test_acc": [0.95]}}
+        out = tmp_path / "frontier.png"
+        plot_efficiency_frontier(results, save_path=str(out))
+        captured = capsys.readouterr()
+        assert "skipped" in captured.out.lower()
+        assert not out.exists()
+
+    def test_single_optimizer(self, tmp_path):
+        """Single optimizer (no frontier line) renders without error."""
+        results = _make_frontier_results(series=("Adam",), times=(5.0,), accs=(0.95,))
+        out = tmp_path / "frontier_single.png"
+        plot_efficiency_frontier(results, save_path=str(out))
+        assert out.exists()
+
+    def test_with_std_error_bars(self, tmp_path):
+        """test_acc_std present → error bars drawn without error."""
+        results = _make_frontier_results()
+        for hist in results.values():
+            hist["test_acc_std"] = [0.01]
+        out = tmp_path / "frontier_std.png"
+        plot_efficiency_frontier(results, save_path=str(out))
+        assert out.exists()
+
+    def test_multi_dataset_model(self, tmp_path):
+        """Multiple (dataset, model) combos → multiple subplots, file saved."""
+        results = {
+            ("MNIST",        "MLP",     "Adam"): {"test_acc": [0.97], "time_elapsed": [4.0]},
+            ("MNIST",        "MLP",     "SGD"):  {"test_acc": [0.95], "time_elapsed": [3.0]},
+            ("FashionMNIST", "MLP",     "Adam"): {"test_acc": [0.89], "time_elapsed": [5.0]},
+        }
+        out = tmp_path / "frontier_multi.png"
+        plot_efficiency_frontier(results, save_path=str(out))
         assert out.exists()
