@@ -148,6 +148,56 @@ class EarlyStopping:
             model.load_state_dict({k: v.to(device) for k, v in self.best_state.items()})
 
 
+# Optimizer state keys to track (mean abs value per linear layer per epoch)
+_OPT_STATE_KEYS = ("exp_avg_sq", "exp_avg", "hessian")
+
+
+def _extract_optimizer_states(
+    model: nn.Module,
+    optimizer,
+    layer_names: list[str],
+) -> dict:
+    """Read per-layer optimizer state scalars after a training step.
+
+    Returns a dict with entries of two shapes:
+      ``state_key -> {layer_name: float}``  — per-parameter tensor states
+      ``"d"       -> float``                — Prodigy's scalar LR estimate
+
+    Parameters are matched to ``layer_names`` by position (the same ordering
+    that ``linear_layer_names()`` and ``weight_norms()`` use), so display
+    names like ``"L1(64→32)"`` are correctly assigned.
+    Only each layer's weight matrix (ndim ≥ 2) is read; biases are skipped.
+    """
+    result: dict = {}
+
+    layer_idx = 0
+    for module in model.modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        if layer_idx >= len(layer_names):
+            break
+        layer_name = layer_names[layer_idx]
+        layer_idx += 1
+
+        param = module.weight
+        if param not in optimizer.state:
+            continue
+        param_state = optimizer.state[param]
+        for key in _OPT_STATE_KEYS:
+            if key not in param_state:
+                continue
+            val = param_state[key].detach().float().abs().mean().item()
+            result.setdefault(key, {})[layer_name] = val
+
+    # Prodigy stores its effective-LR estimate d in param_groups (not per-param state)
+    for pg in optimizer.param_groups:
+        if "d" in pg:
+            result["d"] = float(pg["d"])
+            break
+
+    return result
+
+
 def save_checkpoint(
     path: str,
     epoch: int,
@@ -639,6 +689,7 @@ def run_training(
         "step_losses": [],
         "learning_rates": [],
         "early_stopped_epoch": None,
+        "optimizer_states": {},
     }
 
     es = EarlyStopping(patience, min_delta)
@@ -701,6 +752,16 @@ def run_training(
         for n in layer_names:
             history["weight_norms"][n].append(w_norms.get(n, float("nan")))
             history["grad_norms"][n].append(epoch_result["grad_norms_per_layer"].get(n, float("nan")))
+
+        # Optimizer internal state snapshot
+        _states = _extract_optimizer_states(model, optimizer, layer_names)
+        for key, val in _states.items():
+            if isinstance(val, dict):
+                state_entry = history["optimizer_states"].setdefault(key, {})
+                for layer, scalar in val.items():
+                    state_entry.setdefault(layer, []).append(scalar)
+            else:
+                history["optimizer_states"].setdefault(key, []).append(val)
 
         # Best checkpoint
         if checkpoint_dir and test_acc > best_test_acc:

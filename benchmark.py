@@ -26,7 +26,7 @@ from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
 from report import generate_report
-from visualizer import plot_benchmark, plot_lr_sensitivity, plot_grad_flow_heatmap
+from visualizer import plot_benchmark, plot_lr_sensitivity, plot_grad_flow_heatmap, plot_optimizer_states
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +290,39 @@ def _aggregate_histories(histories: list[dict]) -> dict:
                 merged[subkey] = []
         result[key] = merged
 
+    # optimizer_states: {state_key: {layer: [floats]} or [floats]}
+    opt_states_list = [h.get("optimizer_states") or {} for h in histories]
+    all_state_keys: set = set()
+    for d in opt_states_list:
+        all_state_keys.update(d.keys())
+    aggregated_opt: dict = {}
+    for state_key in all_state_keys:
+        vals = [d[state_key] for d in opt_states_list if state_key in d]
+        if not vals:
+            continue
+        if isinstance(vals[0], dict):
+            all_layers: set = set()
+            for v in vals:
+                all_layers.update(v.keys())
+            merged: dict = {}
+            for layer in all_layers:
+                sub_vals = [v.get(layer) or [] for v in vals]
+                non_empty_sub = [v for v in sub_vals if v]
+                if non_empty_sub:
+                    min_len = min(len(v) for v in non_empty_sub)
+                    arr = np.array([v[:min_len] for v in non_empty_sub], dtype=float)
+                    merged[layer] = arr.mean(axis=0).tolist()
+                else:
+                    merged[layer] = []
+            aggregated_opt[state_key] = merged
+        else:
+            non_empty = [v for v in vals if v]
+            if non_empty:
+                min_len = min(len(v) for v in non_empty)
+                arr = np.array([v[:min_len] for v in non_empty], dtype=float)
+                aggregated_opt[state_key] = arr.mean(axis=0).tolist()
+    result["optimizer_states"] = aggregated_opt
+
     for key in histories[0]:
         if key not in result:
             result[key] = histories[0][key]
@@ -509,6 +542,8 @@ def parse_args():
                         "only generated when --lrs has ≥2 values)")
     p.add_argument("--save-grad-heatmap", default="plots/grad_flow.png",
                    help="Path to save per-layer gradient flow heatmap ('' to disable)")
+    p.add_argument("--save-opt-states", default="plots/opt_states.png",
+                   help="Path to save optimizer internal state figure ('' to disable)")
     return p.parse_args()
 
 
@@ -602,6 +637,10 @@ def main():
     # ── Gradient Flow Heatmap ─────────────────────────────────────────────
     if args.save_grad_heatmap:
         plot_grad_flow_heatmap(results, save_path=args.save_grad_heatmap)
+
+    # ── Optimizer State Plot ───────────────────────────────────────────────
+    if args.save_opt_states:
+        plot_optimizer_states(results, save_path=args.save_opt_states)
 
     # ── Report ────────────────────────────────────────────────────────────
     if args.report_path:

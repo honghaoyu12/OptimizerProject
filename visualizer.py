@@ -548,3 +548,134 @@ def plot_lr_sensitivity(
         print(f"\n  LR sensitivity figure saved to {save_path}")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Optimizer internal state plot
+# ---------------------------------------------------------------------------
+
+_STATE_LABELS = {
+    "exp_avg_sq": "2nd Moment v_t",
+    "exp_avg":    "Momentum |m|",
+    "hessian":    "Hessian diagonal",
+    "d":          "LR estimate d",
+}
+
+
+def plot_optimizer_states(
+    results: dict,
+    save_path: str | None = "plots/opt_states.png",
+) -> None:
+    """Plot optimizer internal state trajectories for each benchmark run.
+
+    Two panel types depending on the state:
+
+    * **Scalar trajectory** (e.g. Prodigy's ``d``): line plot showing how
+      the scalar evolves over epochs.
+    * **Per-layer heatmap** (e.g. Adam ``exp_avg_sq``, Lion ``exp_avg``,
+      Sophia ``hessian``): ``imshow`` grid with x=epoch, y=layer
+      (input at bottom), colour=log₁₀ of mean absolute state magnitude.
+      Uses the ``plasma`` colourmap to distinguish it from the gradient
+      flow heatmap (``viridis``).
+
+    Layout: rows = (dataset, model, state_key); columns = optimizer series.
+
+    Silently skips when no ``"optimizer_states"`` data is found.
+
+    Parameters
+    ----------
+    results : {(dataset_name, model_name, series_name): history_dict}
+        Same format as returned by ``run_benchmark()``.
+    save_path : str | None
+        File path to save the figure.  ``None`` or ``''`` disables saving.
+    """
+    # Group: (ds, model, state_key) → [(series, history), ...]
+    grouped: dict = {}
+    for (ds, model, series), hist in results.items():
+        opt_states = hist.get("optimizer_states") or {}
+        for key, val in opt_states.items():
+            has_data = any(v for v in val.values()) if isinstance(val, dict) else bool(val)
+            if has_data:
+                grouped.setdefault((ds, model, key), []).append((series, hist))
+
+    if not grouped:
+        print("\n  (Optimizer state plot skipped: no optimizer_states found in results)")
+        return
+
+    row_keys = sorted(grouped.keys())
+    n_rows = len(row_keys)
+    n_cols = max(len(v) for v in grouped.values())
+
+    fig_w = max(5, 4.0 * n_cols)
+    fig_h = max(4, 3.5 * n_rows)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    fig.suptitle("Optimizer Internal State", fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name, state_key) in enumerate(row_keys):
+        label = _STATE_LABELS.get(state_key, state_key)
+        series_list = grouped[(ds_name, mdl_name, state_key)]
+
+        for col in range(n_cols):
+            ax = axes[row][col]
+            if col >= len(series_list):
+                ax.set_visible(False)
+                continue
+
+            series, hist = series_list[col]
+            state_data = (hist.get("optimizer_states") or {}).get(state_key)
+            title = f"{ds_name}/{mdl_name}\n{series}\n{label}"
+
+            if isinstance(state_data, list):
+                # Scalar trajectory (e.g. Prodigy's d)
+                epochs_range = list(range(1, len(state_data) + 1))
+                ax.plot(epochs_range, state_data, color="#377eb8", linewidth=1.8,
+                        marker="o", markersize=4)
+                ax.set_xlabel("Epoch", fontsize=8)
+                ax.set_ylabel(label, fontsize=8)
+                ax.set_title(title, fontsize=8)
+                ax.tick_params(labelsize=7)
+
+            elif isinstance(state_data, dict) and state_data:
+                # Per-layer heatmap
+                layer_names_ordered = list(state_data.keys())
+                n_layers = len(layer_names_ordered)
+                n_epochs = max(len(v) for v in state_data.values())
+
+                matrix = np.full((n_layers, n_epochs), float("nan"))
+                for i, ln in enumerate(layer_names_ordered):
+                    for j, v in enumerate(state_data[ln]):
+                        if v is not None and v > 0:
+                            matrix[i, j] = math.log10(v)
+                        elif v == 0:
+                            matrix[i, j] = -10.0
+
+                # Flip so input layer is at the bottom
+                matrix = matrix[::-1]
+                layer_labels = layer_names_ordered[::-1]
+
+                vmin = np.nanmin(matrix) if not np.all(np.isnan(matrix)) else -10
+                vmax = np.nanmax(matrix) if not np.all(np.isnan(matrix)) else 0
+
+                im = ax.imshow(
+                    matrix, aspect="auto", origin="lower", cmap="plasma",
+                    vmin=vmin, vmax=vmax, interpolation="nearest",
+                )
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
+                             label=f"log₁₀({label})")
+                ax.set_title(title, fontsize=8)
+                ax.set_xlabel("Epoch", fontsize=8)
+                ax.set_ylabel("Layer", fontsize=8)
+                ax.set_xticks(range(n_epochs))
+                ax.set_xticklabels([str(e + 1) for e in range(n_epochs)], fontsize=7)
+                ax.set_yticks(range(n_layers))
+                ax.set_yticklabels(layer_labels, fontsize=7)
+                ax.tick_params(labelsize=7)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Optimizer state figure saved to {save_path}")
+
+    plt.show()

@@ -4,6 +4,48 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 26 — Optimizer Internal State Plot
+
+### `train.py`
+
+- **`_OPT_STATE_KEYS = ("exp_avg_sq", "exp_avg", "hessian")`** — module-level tuple naming the per-parameter tensor states to track.
+- **`_extract_optimizer_states(model, optimizer, layer_names)`** — new helper. Iterates linear layers by position (matching `linear_layer_names()` ordering) and reads each weight parameter's optimizer state. Returns `{state_key: {display_name: float}}` for tensor states and `{"d": float}` for Prodigy's scalar LR estimate (read from `param_groups`). Only weight matrices (ndim ≥ 2) are included; biases skipped.
+- **`run_training()`** — `history["optimizer_states"]` initialised to `{}`. After each epoch's training step, `_extract_optimizer_states()` is called and results appended: dict-valued states accumulate as `{state_key: {layer: [floats]}}`, scalar states as `{state_key: [floats]}`.
+
+### `benchmark.py`
+
+- **`_aggregate_histories()`** — new block handles `"optimizer_states"`: per-layer dict values averaged same as `grad_norms`; scalar list values averaged same as `list_keys`.
+- **`--save-opt-states`** flag (default: `plots/opt_states.png`, `''` disables).
+- Import updated to include `plot_optimizer_states`.
+- Called in `main()` after gradient flow heatmap.
+
+### `visualizer.py`
+
+- **`_STATE_LABELS`** — display name map: `exp_avg_sq → "2nd Moment v_t"`, `exp_avg → "Momentum |m|"`, `hessian → "Hessian diagonal"`, `d → "LR estimate d"`.
+- **`plot_optimizer_states(results, save_path)`** — new function. Groups results by `(dataset, model, state_key)` and renders two panel types:
+  - **Scalar trajectory** (`d`): line plot with markers — shows Prodigy's effective LR estimate climbing over epochs.
+  - **Per-layer heatmap** (`exp_avg_sq`, `exp_avg`, `hessian`): `imshow` with `plasma` colourmap (distinct from `viridis` used in grad flow heatmap); x=epoch, y=layer (input at bottom); log₁₀ colour scale. Skips with message when no data.
+
+### `tests/test_train.py`
+
+Five new tests (`TestOptimizerStates`):
+- `test_history_has_optimizer_states_key` — key always present.
+- `test_adam_tracks_exp_avg_sq` — Adam → `exp_avg_sq` populated, one float per epoch per layer.
+- `test_extract_returns_empty_for_fresh_optimizer` — before any step, returns `{}`.
+- `test_extract_adam_exp_avg_sq_after_step` — after one step, all linear layers present.
+- `test_sgd_produces_no_tracked_state` — vanilla SGD → empty `optimizer_states`.
+
+### `tests/test_visualizer.py`
+
+Six new tests (`TestOptimizerStatePlot`):
+- `test_runs_without_error`, `test_saves_file`, `test_skips_when_no_optimizer_states`, `test_scalar_trajectory`, `test_mixed_state_types`, `test_multi_optimizer_same_state`.
+
+**Implementation note:** `_extract_optimizer_states` iterates `model.modules()` by position (not by param name), mirroring how `weight_norms()` and `linear_layer_names()` work — necessary because `linear_layer_names()` generates synthetic display names (`L1(64→32)`) that don't match PyTorch's internal parameter name strings.
+
+Total tests: 325 (up from 314).
+
+---
+
 ## Round 25 — Per-Layer Gradient Flow Heatmap
 
 ### `visualizer.py`

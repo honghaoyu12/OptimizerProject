@@ -556,6 +556,24 @@ Total tests: 303 (up from 299). CI green on `main`.
 
 ---
 
+## Session 30 — Optimizer Internal State Plot
+
+**What we discussed:**
+- Focused on four high-value states: Adam's `exp_avg_sq` (adaptive scale), Lion's `exp_avg` (momentum), Sophia's `hessian` (curvature), Prodigy's `d` (automatic LR estimate)
+- Key implementation challenge: `linear_layer_names()` produces synthetic display names (`L1(64→32)`) that don't match PyTorch's internal param name strings — must iterate modules by position, not by name, mirroring how `weight_norms()` works
+- Two panel types: per-layer heatmap (`plasma` colourmap, distinct from grad flow's `viridis`) and scalar line plot (Prodigy `d`)
+
+**What was built:**
+- `train.py`: `_OPT_STATE_KEYS` tuple; `_extract_optimizer_states(model, optimizer, layer_names)` — iterates linear modules by position, reads weight param state, returns per-layer floats + Prodigy `d`; `history["optimizer_states"]` initialised and populated each epoch in `run_training()`
+- `benchmark.py`: `_aggregate_histories()` extended to aggregate `optimizer_states` (handles nested dict + scalar list cases); `--save-opt-states` flag; import updated; called in `main()`
+- `visualizer.py`: `_STATE_LABELS` map; `plot_optimizer_states()` — groups by (ds, model, state_key); renders heatmap or line plot per cell; `plasma` colourmap; skips with message when no data
+- `tests/test_train.py`: 5 new tests (TestOptimizerStates)
+- `tests/test_visualizer.py`: 6 new tests (TestOptimizerStatePlot)
+
+Total tests: 325 (up from 314). CI green on `main`.
+
+---
+
 ## Session 29 — Per-Layer Gradient Flow Heatmap
 
 **What we discussed:**
@@ -614,9 +632,10 @@ Total tests: 308 (up from 303). CI green on `main`.
 | torch.compile | `--compile` in both CLIs — static graph tracing speedup; auto-disabled for Sophia/AdaHessian; try/except fallback |
 | Resume from checkpoint | `--resume PATH` in `train.py`; `resume_from=PATH` in `run_training()` — restores model+optimizer state |
 | Gradient flow heatmap | `plot_grad_flow_heatmap()` in `visualizer.py`; `--save-grad-heatmap` in `benchmark.py`; x=epoch, y=layer, colour=log₁₀\|grad\| |
+| Optimizer state plot | `plot_optimizer_states()` in `visualizer.py`; `--save-opt-states` in `benchmark.py`; exp_avg_sq/exp_avg/hessian heatmaps + Prodigy d line |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 314 passing |
+| Tests | 325 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

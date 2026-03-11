@@ -10,6 +10,7 @@ from train import (
     OPTIMIZER_REGISTRY,
     SCHEDULER_REGISTRY,
     EarlyStopping,
+    _extract_optimizer_states,
     build_model,
     build_optimizer,
     evaluate,
@@ -744,3 +745,71 @@ class TestResume:
             layer_names=ln, verbose=False, resume_from=ckpt_path,
         )
         # After load_state_dict the model started from zeros; the test just checks no crash.
+
+
+# ---------------------------------------------------------------------------
+# Optimizer internal state tracking
+# ---------------------------------------------------------------------------
+
+class TestOptimizerStates:
+    """Tests for _extract_optimizer_states() and history["optimizer_states"]."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_history_has_optimizer_states_key(self):
+        """history always contains the optimizer_states key after run_training()."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 1, ln, verbose=False)
+        assert "optimizer_states" in history
+
+    def test_adam_tracks_exp_avg_sq(self):
+        """Adam optimizer → exp_avg_sq populated with one entry per epoch per layer."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        opt_states = history["optimizer_states"]
+        assert "exp_avg_sq" in opt_states
+        for layer_vals in opt_states["exp_avg_sq"].values():
+            assert len(layer_vals) == 2  # one entry per epoch
+
+    def test_extract_returns_empty_for_fresh_optimizer(self):
+        """_extract_optimizer_states returns {} before any step (no state built yet)."""
+        model, _, _, _, _, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        result = _extract_optimizer_states(model, opt, ln)
+        assert result == {}
+
+    def test_extract_adam_exp_avg_sq_after_step(self):
+        """After one step, _extract_optimizer_states finds exp_avg_sq for all linear layers."""
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        ln = linear_layer_names(model)
+        tl, _ = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        crit = torch.nn.CrossEntropyLoss()
+        dev = torch.device("cpu")
+        # Run one step to populate optimizer state
+        train_one_epoch(model, tl, opt, crit, dev, ln)
+        result = _extract_optimizer_states(model, opt, ln)
+        assert "exp_avg_sq" in result
+        assert set(result["exp_avg_sq"].keys()) == set(ln)
+        for v in result["exp_avg_sq"].values():
+            assert isinstance(v, float)
+            assert v >= 0
+
+    def test_sgd_produces_no_tracked_state(self):
+        """SGD (no momentum) has no tracked state → optimizer_states is empty."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.SGD(model.parameters(), lr=1e-2)
+        history = run_training(model, tl, vl, opt, crit, dev, 1, ln, verbose=False)
+        assert history["optimizer_states"] == {}

@@ -284,6 +284,7 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
                  per-run for Sophia and AdaHessian (create_graph=True incompatible)
 --save-lr-plot      path for LR sensitivity figure (default: plots/lr_sensitivity.png; only generated when --lrs has ≥2 values)
 --save-grad-heatmap path for per-layer gradient flow heatmap (default: plots/grad_flow.png; '' to disable)
+--save-opt-states   path for optimizer internal state figure (default: plots/opt_states.png; '' to disable)
 --checkpoint-dir    directory for per-run checkpoints
 --report-path       save path for the Markdown benchmark report (default: reports/benchmark_report.md)
 ```
@@ -321,7 +322,7 @@ python train.py --device mps     # Apple Silicon
 
 - **GradScaler occasionally skips a step** when it detects float16 overflow (it reduces the scale factor instead). This is normal AMP behaviour and self-corrects within a few steps.
 
-### 7. Per-layer gradient flow heatmap (`--save-grad-heatmap`)
+### 8. Per-layer gradient flow heatmap (`--save-grad-heatmap`)
 
 After every benchmark run, a gradient flow heatmap is saved to `plots/grad_flow.png` (disable with `--save-grad-heatmap ""`). Each subplot shows:
 
@@ -336,7 +337,22 @@ One subplot per (dataset, model, optimizer) combination. At a glance you can see
 
 The data comes directly from `history["grad_norms"]` already collected by `run_training()` — no additional training overhead.
 
-### 9. `torch.compile` (`--compile`)
+### 9. Optimizer internal state plot (`--save-opt-states`)
+
+After every benchmark run, an optimizer state figure is saved to `plots/opt_states.png` (disable with `--save-opt-states ""`). Each subplot shows how an optimizer's internal buffers evolve over training:
+
+| State key | Optimizers | Panel type | What it reveals |
+|---|---|---|---|
+| `exp_avg_sq` | Adam, AdamW, NAdam, RAdam | Per-layer heatmap (plasma) | Adaptive scale v_t per layer — layers with high variance get smaller effective steps |
+| `exp_avg` | Lion | Per-layer heatmap (plasma) | Momentum magnitude per layer — shows directional commitment |
+| `hessian` | Sophia | Per-layer heatmap (plasma) | Diagonal curvature estimate — shows where the loss surface is sharp |
+| `d` | Prodigy | Scalar line plot | Automatic LR estimate climbing toward the effective learning rate |
+
+For heatmaps: x=epoch, y=layer (input at bottom), colour=log₁₀ of mean absolute state value. The `plasma` colourmap distinguishes these plots from the `viridis` gradient flow heatmap.
+
+Only optimizers with tracked state produce output. SGD, vanilla SGD, and others with no momentum or second-moment buffers are silently skipped.
+
+### 10. `torch.compile` (`--compile`)
 
 `--compile` calls `torch.compile(model)` before training, enabling PyTorch 2.x's kernel fusion and graph optimization. Expected speedup is ~20–40% on CUDA or MPS; there is no benefit on CPU.
 
@@ -344,7 +360,7 @@ The data comes directly from `history["grad_norms"]` already collected by `run_t
 
 If `torch.compile` fails for any other reason (e.g. unsupported ops or platform restrictions), training falls back to eager mode with a warning — no crash.
 
-### 10. Resume from checkpoint (`--resume`)
+### 11. Resume from checkpoint (`--resume`)
 
 `--resume PATH` loads a `.pt` checkpoint saved by a previous run and continues training from where it left off:
 
@@ -360,7 +376,7 @@ The checkpoint contains `epoch`, `model_state_dict`, `optimizer_state_dict`, `me
 
 `run_training()` also accepts `resume_from=PATH` for programmatic use in notebooks or custom scripts.
 
-### 11. If the live plot window freezes
+### 12. If the live plot window freezes
 
 Some systems don't support interactive matplotlib windows well. Use `--no-plot` to skip it and save to a file instead:
 
