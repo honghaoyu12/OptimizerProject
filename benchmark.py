@@ -26,8 +26,8 @@ from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
 from report import generate_report
-from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_grad_flow_heatmap,
-                        plot_optimizer_states, plot_efficiency_frontier)
+from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity_scores,
+                        plot_grad_flow_heatmap, plot_optimizer_states, plot_efficiency_frontier)
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +541,9 @@ def parse_args():
     p.add_argument("--save-lr-plot", default="plots/lr_sensitivity.png",
                    help="Path to save LR sensitivity figure ('' to disable; "
                         "only generated when --lrs has ≥2 values)")
+    p.add_argument("--save-lr-scores", default="plots/lr_sensitivity_scores.png",
+                   help="Path to save LR sensitivity score bar chart ('' to disable; "
+                        "only generated when --lrs has ≥2 values)")
     p.add_argument("--save-grad-heatmap", default="plots/grad_flow.png",
                    help="Path to save per-layer gradient flow heatmap ('' to disable)")
     p.add_argument("--save-opt-states", default="plots/opt_states.png",
@@ -636,6 +639,10 @@ def main():
     # ── LR Sensitivity Plot ───────────────────────────────────────────────
     if args.lrs is not None and len(args.lrs) > 1 and args.save_lr_plot:
         plot_lr_sensitivity(results, save_path=args.save_lr_plot)
+
+    # ── LR Sensitivity Score Chart ────────────────────────────────────────
+    if args.lrs is not None and len(args.lrs) > 1 and args.save_lr_scores:
+        plot_lr_sensitivity_scores(results, save_path=args.save_lr_scores)
 
     # ── Gradient Flow Heatmap ─────────────────────────────────────────────
     if args.save_grad_heatmap:

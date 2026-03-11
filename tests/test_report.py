@@ -135,3 +135,28 @@ def test_report_shows_std_when_present():
     results[key]["test_acc_std"] = [0.01, 0.01, 0.015]
     out = generate_report(results, _DEFAULT_CONFIG, save_path="")
     assert "±" in out
+
+
+def test_report_lr_sensitivity_section_present_when_swept():
+    """Results with config_lr and ≥2 LRs → 'LR Sensitivity' section in report."""
+    results = {}
+    for lr, acc in [(1e-3, 0.97), (1e-2, 0.90), (1e-1, 0.70)]:
+        series = f"Adam (lr={lr:g})"
+        results[("MNIST", "MLP", series)] = {
+            "train_loss":   [0.3],
+            "train_acc":    [0.95],
+            "test_acc":     [acc],
+            "time_elapsed": [2.0],
+            "config_lr":    lr,
+        }
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "LR Sensitivity" in out
+    assert "Range" in out
+    assert "Best LR" in out
+
+
+def test_report_lr_sensitivity_section_absent_without_sweep():
+    """Results with no config_lr → 'LR Sensitivity' section not in report."""
+    results = _make_results()
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "LR Sensitivity" not in out

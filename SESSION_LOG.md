@@ -556,6 +556,24 @@ Total tests: 303 (up from 299). CI green on `main`.
 
 ---
 
+## Session 32 — LR Sensitivity Score
+
+**What we discussed:**
+- Changed metric from `std/mean` (coefficient of variation) to `range = max - min` in pp — more interpretable: "Adam swings 4.2pp across LRs" vs "CV=0.043"
+- Two outputs: bar chart + report section; data already exists from LR sweeps, zero training overhead
+- `_compute_lr_sensitivity()` placed in `visualizer.py` (exported) so both `report.py` and tests can share it
+
+**What was built:**
+- `visualizer.py`: `_compute_lr_sensitivity()` helper (exported); `plot_lr_sensitivity_scores()` — horizontal bar chart, RdYlGn_r colourmap, sorted most-robust-first, range ± std annotations
+- `report.py`: Section 4.5 "LR Sensitivity" table (Range pp | Std pp | Best LR | Worst LR | LRs tested); inserted between Rankings and Per-Optimizer Summary; absent when no sweep data
+- `benchmark.py`: `--save-lr-scores` flag; import updated; called when `--lrs` has ≥2 values
+- `tests/test_visualizer.py`: 9 new tests (TestComputeLrSensitivity × 5 + TestLrSensitivityScores × 4)
+- `tests/test_report.py`: 2 new tests (section present/absent)
+
+Total tests: 347 (up from 336). CI green on `main`.
+
+---
+
 ## Session 31 — Efficiency Frontier Plot
 
 **What we discussed:**
@@ -650,9 +668,10 @@ Total tests: 308 (up from 303). CI green on `main`.
 | Gradient flow heatmap | `plot_grad_flow_heatmap()` in `visualizer.py`; `--save-grad-heatmap` in `benchmark.py`; x=epoch, y=layer, colour=log₁₀\|grad\| |
 | Optimizer state plot | `plot_optimizer_states()` in `visualizer.py`; `--save-opt-states` in `benchmark.py`; exp_avg_sq/exp_avg/hessian heatmaps + Prodigy d line |
 | Efficiency frontier | `plot_efficiency_frontier()` in `visualizer.py`; `--save-frontier` in `benchmark.py`; Pareto-optimal accuracy vs time scatter |
+| LR sensitivity score | `_compute_lr_sensitivity()` + `plot_lr_sensitivity_scores()` in `visualizer.py`; Section 4.5 in report; `--save-lr-scores` in `benchmark.py` |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 336 passing |
+| Tests | 347 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

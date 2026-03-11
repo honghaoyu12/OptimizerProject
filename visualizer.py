@@ -470,6 +470,138 @@ def plot_grad_flow_heatmap(
     plt.show()
 
 # ---------------------------------------------------------------------------
+# LR sensitivity score helper + bar chart
+# ---------------------------------------------------------------------------
+
+def _compute_lr_sensitivity(results: dict) -> dict:
+    """Compute per-optimizer LR sensitivity scores from a multi-LR sweep.
+
+    Groups results by ``(dataset, model, base_optimizer)`` and, for each
+    group with ≥2 LR values, computes:
+
+    * ``range``    — ``max(final_acc) - min(final_acc)`` in percentage points
+    * ``std``      — standard deviation of final accs in percentage points
+    * ``best_lr``  — LR value that achieved the highest final accuracy
+    * ``worst_lr`` — LR value that achieved the lowest final accuracy
+    * ``n_lrs``    — number of LR values swept
+
+    Only entries with ``config_lr`` in their history are considered.
+    Returns an empty dict when fewer than 2 distinct LRs are present.
+
+    Parameters
+    ----------
+    results : {(dataset_name, model_name, series_name): history_dict}
+        Same format as returned by ``run_benchmark()``.
+    """
+    lr_entries = {k: v for k, v in results.items() if v.get("config_lr") is not None}
+
+    groups: dict = {}
+    for (ds, model, series), hist in lr_entries.items():
+        base_opt = series.split(" (")[0]
+        lr = hist["config_lr"]
+        test_acc = hist.get("test_acc", [])
+        if not test_acc:
+            continue
+        groups.setdefault((ds, model, base_opt), []).append((lr, test_acc[-1] * 100))
+
+    scores: dict = {}
+    for (ds, model, base_opt), points in groups.items():
+        if len(points) < 2:
+            continue
+        lrs, accs = zip(*points)
+        lrs, accs = list(lrs), list(accs)
+        max_acc, min_acc = max(accs), min(accs)
+        scores[(ds, model, base_opt)] = {
+            "range":    round(max_acc - min_acc, 3),
+            "std":      round(float(np.std(accs)), 3),
+            "best_lr":  lrs[accs.index(max_acc)],
+            "worst_lr": lrs[accs.index(min_acc)],
+            "n_lrs":    len(points),
+        }
+
+    return scores
+
+
+def plot_lr_sensitivity_scores(
+    results: dict,
+    save_path: str | None = "plots/lr_sensitivity_scores.png",
+) -> None:
+    """Horizontal bar chart of per-optimizer LR sensitivity scores.
+
+    Each bar shows the **range** of final test accuracy (in percentage points)
+    across all LR values swept for that optimizer.  Bars are sorted from most
+    robust (smallest range, top) to most fragile (largest range, bottom).
+    A ``±`` annotation shows the standard deviation alongside the range.
+
+    One subplot per (dataset × model) combination.  Silently skips when fewer
+    than two LR values were swept.
+
+    Parameters
+    ----------
+    results : {(dataset_name, model_name, series_name): history_dict}
+        Same format as returned by ``run_benchmark()``.
+    save_path : str | None
+        File path to save the figure.  ``None`` or ``''`` disables saving.
+    """
+    scores = _compute_lr_sensitivity(results)
+    if not scores:
+        print("\n  (LR sensitivity score plot skipped: need ≥2 LR values per optimizer)")
+        return
+
+    combos = sorted({(k[0], k[1]) for k in scores})
+    n_rows = len(combos)
+    fig_w = 8
+    fig_h = max(4, 2 + 0.5 * max(
+        sum(1 for k in scores if k[0] == ds and k[1] == mdl)
+        for ds, mdl in combos
+    ) * n_rows)
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(fig_w, fig_h), squeeze=False)
+    fig.suptitle("LR Sensitivity Score\n(accuracy range across swept LRs — lower = more robust)",
+                 fontsize=12, fontweight="bold")
+
+    cmap = plt.get_cmap("RdYlGn_r")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        subset = {k[2]: v for k, v in scores.items()
+                  if k[0] == ds_name and k[1] == mdl_name}
+        # Sort: most robust (smallest range) at top
+        opts = sorted(subset, key=lambda o: subset[o]["range"])
+        ranges = [subset[o]["range"] for o in opts]
+        stds   = [subset[o]["std"]   for o in opts]
+
+        # Colour: green (low range) → red (high range)
+        max_r = max(ranges) if max(ranges) > 0 else 1.0
+        colors = [cmap(r / max_r) for r in ranges]
+
+        bars = ax.barh(opts, ranges, color=colors, edgecolor="white", linewidth=0.5)
+        # Annotate each bar with "X.X ± Y.Y pp"
+        for bar, r, s in zip(bars, ranges, stds):
+            ax.text(
+                bar.get_width() + max_r * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f"{r:.2f} ± {s:.2f} pp",
+                va="center", ha="left", fontsize=8,
+            )
+
+        ax.set_xlim(0, max_r * 1.35)
+        ax.set_xlabel("Accuracy range (percentage points)", fontsize=9)
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.tick_params(labelsize=8)
+        ax.invert_yaxis()  # most robust at top
+
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  LR sensitivity score chart saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
 # LR sensitivity plot
 # ---------------------------------------------------------------------------
 

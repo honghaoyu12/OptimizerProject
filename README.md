@@ -283,6 +283,7 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --compile        apply torch.compile() to each model for kernel-fusion speedup; auto-disabled
                  per-run for Sophia and AdaHessian (create_graph=True incompatible)
 --save-lr-plot      path for LR sensitivity figure (default: plots/lr_sensitivity.png; only generated when --lrs has ≥2 values)
+--save-lr-scores    path for LR sensitivity score bar chart (default: plots/lr_sensitivity_scores.png; only when --lrs has ≥2 values)
 --save-grad-heatmap path for per-layer gradient flow heatmap (default: plots/grad_flow.png; '' to disable)
 --save-opt-states   path for optimizer internal state figure (default: plots/opt_states.png; '' to disable)
 --save-frontier     path for efficiency frontier plot (default: plots/efficiency_frontier.png; '' to disable)

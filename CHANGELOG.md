@@ -4,6 +4,32 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 28 — LR Sensitivity Score
+
+### `visualizer.py`
+
+- **`_compute_lr_sensitivity(results)`** — shared helper that groups results by `(dataset, model, base_optimizer)` and, for each group with ≥2 LR values, computes: `range` (max−min final acc in pp), `std` (standard deviation in pp), `best_lr`, `worst_lr`, `n_lrs`. Returns empty dict when fewer than 2 LRs were swept.
+- **`plot_lr_sensitivity_scores(results, save_path)`** — horizontal bar chart, one subplot per (dataset, model), sorted most-robust-first. Bar colour scales from green (low range) to red (high range) via `RdYlGn_r`. Each bar annotated with `X.XX ± Y.YY pp`. Silently skips when `_compute_lr_sensitivity` returns empty.
+
+### `report.py`
+
+- **Section 4.5 "LR Sensitivity"** — inserted between Rankings and Per-Optimizer Summary when ≥2 LRs were swept. Table columns: Optimizer | Range (pp) | Std (pp) | Best LR | Worst LR | LRs tested. Sorted most-robust-first. Absent when no sweep data is present (fully backward-compatible).
+- Imports `_compute_lr_sensitivity` from `visualizer`.
+
+### `benchmark.py`
+
+- **`--save-lr-scores`** flag (default: `plots/lr_sensitivity_scores.png`, `''` disables). Only generated when `--lrs` has ≥2 values (same guard as `--save-lr-plot`).
+- Import updated; call added in `main()`.
+
+### Tests
+
+- `tests/test_visualizer.py`: 9 new tests — `TestComputeLrSensitivity` (5: score keys present, range formula, best/worst LR, single-LR exclusion, no-config_lr exclusion) + `TestLrSensitivityScores` (4: runs, saves, skips, multi-optimizer).
+- `tests/test_report.py`: 2 new tests — section present when swept, absent without sweep.
+
+Total tests: 347 (up from 336).
+
+---
+
 ## Round 27 — Efficiency Frontier Plot
 
 ### `visualizer.py`

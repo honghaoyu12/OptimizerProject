@@ -12,6 +12,8 @@ import os
 import statistics
 from datetime import datetime
 
+from visualizer import _compute_lr_sensitivity
+
 
 def generate_report(
     results: dict,
@@ -194,6 +196,36 @@ def generate_report(
             f"- 🎯 **Most stable**: {most_stable} (std={_stability(subset[most_stable]):.4f})",
             "",
         ]
+
+    # ------------------------------------------------------------------
+    # Section 4.5 — LR Sensitivity (only when ≥2 LRs were swept)
+    # ------------------------------------------------------------------
+    lr_scores = _compute_lr_sensitivity(results)
+    if lr_scores:
+        lines += ["## LR Sensitivity", ""]
+        lines += [
+            "Ranks optimizers by how much their final accuracy varies across the swept LR values.",
+            "**Lower range = more robust to LR choice.**",
+            "",
+        ]
+
+        for ds, mdl in combos:
+            subset = {k[2]: v for k, v in lr_scores.items()
+                      if k[0] == ds and k[1] == mdl}
+            if not subset:
+                continue
+            lines += [f"### {ds} / {mdl}", ""]
+            lines += [
+                "| Optimizer | Range (pp) | Std (pp) | Best LR | Worst LR | LRs tested |",
+                "|---|---|---|---|---|---|",
+            ]
+            for opt in sorted(subset, key=lambda o: subset[o]["range"]):
+                s = subset[opt]
+                lines.append(
+                    f"| {opt} | {s['range']:.2f} | {s['std']:.2f} "
+                    f"| {s['best_lr']:g} | {s['worst_lr']:g} | {s['n_lrs']} |"
+                )
+            lines.append("")
 
     # ------------------------------------------------------------------
     # Section 5 — Per-Optimizer Summary

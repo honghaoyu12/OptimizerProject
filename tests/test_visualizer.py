@@ -4,9 +4,10 @@ import matplotlib
 matplotlib.use("Agg")  # non-interactive backend — must be set before any pyplot import
 
 import pytest
-from visualizer import (plot_lr_sensitivity, plot_grad_flow_heatmap,
-                        plot_optimizer_states, plot_efficiency_frontier,
-                        _pareto_frontier)
+from visualizer import (plot_lr_sensitivity, plot_lr_sensitivity_scores,
+                        plot_grad_flow_heatmap, plot_optimizer_states,
+                        plot_efficiency_frontier, _pareto_frontier,
+                        _compute_lr_sensitivity)
 
 
 # ---------------------------------------------------------------------------
@@ -307,4 +308,96 @@ class TestEfficiencyFrontier:
         }
         out = tmp_path / "frontier_multi.png"
         plot_efficiency_frontier(results, save_path=str(out))
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# _compute_lr_sensitivity / plot_lr_sensitivity_scores
+# ---------------------------------------------------------------------------
+
+def _make_sweep_results(opts=("Adam", "SGD"), lrs=(1e-3, 1e-2, 1e-1),
+                        accs=None):
+    """Multi-LR sweep results. accs: {opt: [acc_per_lr]}."""
+    if accs is None:
+        accs = {
+            "Adam": [0.97, 0.95, 0.80],
+            "SGD":  [0.90, 0.92, 0.60],
+        }
+    results = {}
+    for opt in opts:
+        for i, lr in enumerate(lrs):
+            series = f"{opt} (lr={lr:g})"
+            results[("MNIST", "MLP", series)] = {
+                "test_acc":  [accs[opt][i]],
+                "config_lr": lr,
+            }
+    return results
+
+
+class TestComputeLrSensitivity:
+    def test_returns_scores_for_swept_optimizers(self):
+        """Two optimizers × 3 LRs → scores present for both."""
+        results = _make_sweep_results()
+        scores = _compute_lr_sensitivity(results)
+        keys = [(ds, mdl, opt) for ds, mdl, opt in scores]
+        assert any(opt == "Adam" for _, _, opt in keys)
+        assert any(opt == "SGD"  for _, _, opt in keys)
+
+    def test_range_correct(self):
+        """Range = max - min across LR values in pp."""
+        results = _make_sweep_results(opts=("Adam",), lrs=(1e-3, 1e-2),
+                                      accs={"Adam": [0.90, 0.80]})
+        scores = _compute_lr_sensitivity(results)
+        s = scores[("MNIST", "MLP", "Adam")]
+        assert abs(s["range"] - 10.0) < 1e-6
+
+    def test_best_and_worst_lr(self):
+        """best_lr and worst_lr point to the correct LR values."""
+        results = _make_sweep_results(opts=("Adam",), lrs=(1e-3, 1e-2),
+                                      accs={"Adam": [0.95, 0.80]})
+        scores = _compute_lr_sensitivity(results)
+        s = scores[("MNIST", "MLP", "Adam")]
+        assert s["best_lr"]  == pytest.approx(1e-3)
+        assert s["worst_lr"] == pytest.approx(1e-2)
+
+    def test_single_lr_excluded(self):
+        """Only one LR value → no score (can't compute sensitivity)."""
+        results = {("MNIST", "MLP", "Adam"): {"test_acc": [0.95], "config_lr": 1e-3}}
+        scores = _compute_lr_sensitivity(results)
+        assert scores == {}
+
+    def test_no_config_lr_excluded(self):
+        """Entries without config_lr are ignored."""
+        results = {("MNIST", "MLP", "Adam"): {"test_acc": [0.95]}}
+        scores = _compute_lr_sensitivity(results)
+        assert scores == {}
+
+
+class TestLrSensitivityScores:
+    def test_runs_without_error(self, tmp_path):
+        """plot_lr_sensitivity_scores() completes on valid sweep data."""
+        results = _make_sweep_results()
+        plot_lr_sensitivity_scores(results, save_path=str(tmp_path / "scores.png"))
+
+    def test_saves_file(self, tmp_path):
+        """Figure file is created at the requested path."""
+        results = _make_sweep_results()
+        out = tmp_path / "scores.png"
+        plot_lr_sensitivity_scores(results, save_path=str(out))
+        assert out.exists()
+
+    def test_skips_when_single_lr(self, tmp_path, capsys):
+        """Single LR per optimizer → skip message, no file."""
+        results = {("MNIST", "MLP", "Adam"): {"test_acc": [0.95], "config_lr": 1e-3}}
+        out = tmp_path / "scores.png"
+        plot_lr_sensitivity_scores(results, save_path=str(out))
+        captured = capsys.readouterr()
+        assert "skipped" in captured.out.lower()
+        assert not out.exists()
+
+    def test_multi_optimizer(self, tmp_path):
+        """Multiple optimizers → all bars rendered, file saved."""
+        results = _make_sweep_results(opts=("Adam", "SGD"))
+        out = tmp_path / "scores_multi.png"
+        plot_lr_sensitivity_scores(results, save_path=str(out))
         assert out.exists()
