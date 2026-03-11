@@ -204,7 +204,7 @@ class TestSchedulers:
         return optimizer
 
     def test_registry_has_all_keys(self):
-        assert set(SCHEDULER_REGISTRY.keys()) == {"none", "cosine", "step", "warmup_cosine"}
+        assert set(SCHEDULER_REGISTRY.keys()) == {"none", "cosine", "step", "warmup_cosine", "cosine_wr"}
 
     def test_none_returns_none(self):
         opt = self._make_opt()
@@ -270,6 +270,54 @@ class TestSchedulers:
         lrs = history["learning_rates"]
         assert len(lrs) == 3
         assert all(lr == lrs[0] for lr in lrs), "LR should be constant with no scheduler"
+
+    def test_cosine_wr_lr_is_cyclic(self):
+        """cosine_wr: LR drops to near-zero then resets — not monotonically decreasing."""
+        opt = self._make_opt(lr=0.1)
+        epochs = 9  # 3 restarts of T_0=3
+        scheduler = SCHEDULER_REGISTRY["cosine_wr"](opt, epochs, 0)
+        lrs = []
+        for _ in range(epochs):
+            scheduler.step()
+            lrs.append(opt.param_groups[0]["lr"])
+        # A cyclic schedule must increase at least once (restart point)
+        increased = any(lrs[i] > lrs[i - 1] for i in range(1, len(lrs)))
+        assert increased, "cosine_wr should show at least one LR increase (warm restart)"
+
+    def test_cosine_wr_t0_derived_from_epochs(self):
+        """T_0 = max(1, epochs // 3): for epochs=6, T_0=2 → 3 restarts."""
+        opt = self._make_opt(lr=0.1)
+        scheduler = SCHEDULER_REGISTRY["cosine_wr"](opt, 6, 0)
+        assert hasattr(scheduler, "T_0")
+        assert scheduler.T_0 == 2
+
+    def test_cosine_wr_short_run_no_crash(self):
+        """cosine_wr with epochs=1 (T_0=1) should not raise."""
+        opt = self._make_opt(lr=0.1)
+        scheduler = SCHEDULER_REGISTRY["cosine_wr"](opt, 1, 0)
+        scheduler.step()  # should not raise
+
+    def test_cosine_wr_in_run_training(self):
+        """run_training with cosine_wr records one LR per epoch and shows cycling."""
+        device = torch.device("cpu")
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16]).to(device)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        epochs = 6
+        scheduler = SCHEDULER_REGISTRY["cosine_wr"](optimizer, epochs, 0)
+        criterion = nn.CrossEntropyLoss()
+        loader = dummy_loader(n=32, in_channels=1, image_size=28, num_classes=10)
+        layer_names = linear_layer_names(model)
+
+        history = run_training(
+            model, loader, loader, optimizer, criterion,
+            device, epochs=epochs, layer_names=layer_names,
+            verbose=False, scheduler=scheduler,
+        )
+        lrs = history["learning_rates"]
+        assert len(lrs) == epochs
+        increased = any(lrs[i] > lrs[i - 1] for i in range(1, len(lrs)))
+        assert increased, "cosine_wr history should show at least one LR increase"
 
 
 # ---------------------------------------------------------------------------

@@ -114,6 +114,11 @@ SCHEDULER_REGISTRY: dict = {
         ],
         milestones=[max(1, warmup)],
     ),
+    # T_0 = epochs // 3 gives ~3 restarts over a full run (standard SGDR setup).
+    # T_mult = 1 keeps the restart period constant.
+    "cosine_wr": lambda opt, epochs, warmup: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        opt, T_0=max(1, epochs // 3), T_mult=1, eta_min=0.0
+    ),
 }
 
 
@@ -879,7 +884,7 @@ def parse_args():
                    help="Compute Hessian trace and sharpness each epoch (slow)")
     p.add_argument("--scheduler",    default="none",
                    choices=list(SCHEDULER_REGISTRY.keys()),
-                   help="LR scheduler: none | cosine | step | warmup_cosine")
+                   help="LR scheduler: none | cosine | step | warmup_cosine | cosine_wr")
     p.add_argument("--warmup-epochs", default=5, type=int,
                    help="Linear warmup epochs for warmup_cosine (default: 5)")
     p.add_argument("--patience",  default=0,   type=int,

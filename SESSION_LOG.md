@@ -556,6 +556,21 @@ Total tests: 303 (up from 299). CI green on `main`.
 
 ---
 
+## Session 34 — Cosine Annealing with Warm Restarts (`cosine_wr`)
+
+**What we discussed:**
+- Rounds out the scheduler story: none / cosine / step / warmup_cosine already present; warm restarts (SGDR) add cyclic decay interesting to benchmark because SGD is known to benefit dramatically from restarts while adaptive optimizers (Adam) often don't
+- Design choice: derive T_0 from epochs (T_0 = epochs // 3, ~3 restarts per run, T_mult=1) rather than adding new CLI flags — zero new plumbing, immediately usable
+
+**What was built:**
+- `train.py`: `SCHEDULER_REGISTRY["cosine_wr"]` using `CosineAnnealingWarmRestarts(T_0=max(1, epochs // 3), T_mult=1)`; help string updated
+- `benchmark.py`: help string updated (imports SCHEDULER_REGISTRY from train.py — no other changes)
+- `tests/test_train.py`: `test_registry_has_all_keys` updated; 4 new cosine_wr tests in `TestSchedulers`
+
+Total tests: **360** (up from 356).
+
+---
+
 ## Session 33 — EMA Weights (`--ema-decay`)
 
 **What we discussed:**

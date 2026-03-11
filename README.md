@@ -40,7 +40,7 @@ OptimizerProject/
 │   ├── test_models.py        # 17 tests for MLP, ResNet18, and ViT
 │   ├── test_optimizers.py    # 55 tests for all 20 optimizers
 │   ├── test_metrics.py       # 9 tests for Hessian trace and sharpness
-│   ├── test_train.py         # 73 tests for datasets, build_model, training loop, schedulers, early stopping, grad clipping, weight decay
+│   ├── test_train.py         # 77 tests for datasets, build_model, training loop, schedulers, early stopping, grad clipping, weight decay
 │   ├── test_synthetic.py     # 52 tests for the five synthetic datasets
 │   ├── test_logger.py        # 30 tests for TrainingLogger
 │   ├── test_checkpoints.py   # 5 tests for checkpoint save/restore
@@ -176,7 +176,7 @@ python train.py --model vit --dataset cifar10 --optimizer adamw --epochs 15 \
 --save-plot      path to save the final figure                       (default: plots/training_curves.png)
 --log-dir        root directory for training logs                    (default: logs/)
 --hessian        enable Hessian trace + sharpness computation
---scheduler      none | cosine | step | warmup_cosine               (default: none)
+--scheduler      none | cosine | step | warmup_cosine | cosine_wr   (default: none)
 --warmup-epochs  linear warmup epochs for warmup_cosine              (default: 5)
 --patience       early stopping patience (0 = disabled)             (default: 0)
 --min-delta      min val-loss improvement to reset patience counter  (default: 0.0)
@@ -271,8 +271,8 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --device         cpu | cuda | mps | auto                    (default: auto)
 --save-plot      output figure path                          (default: plots/benchmark.png)
 --log-dir        root directory for training logs            (default: logs/)
---scheduler      none | cosine | step | warmup_cosine        (default: none)
---warmup-epochs  linear warmup epochs for warmup_cosine      (default: 5)
+--scheduler      none | cosine | step | warmup_cosine | cosine_wr   (default: none)
+--warmup-epochs  linear warmup epochs for warmup_cosine              (default: 5)
 --patience       early stopping patience (0 = disabled)      (default: 0)
 --min-delta      min val-loss improvement to reset patience  (default: 0.0)
 --max-grad-norm  clip global gradient norm (None = disabled)
@@ -500,7 +500,7 @@ Expected output: `303 passed` in a few seconds (all on CPU, no downloads needed)
 | `tests/test_models.py` | 17 | MLP, ResNet18, ViT forward passes; output shapes; patch size assertion |
 | `tests/test_optimizers.py` | 55 | Registry completeness; finite weights after one step for all 20 optimizers; optimizer-specific state and behaviour |
 | `tests/test_metrics.py` | 9 | Hessian trace (type, finiteness, positivity, NaN on no-param model); sharpness (type, non-negativity, weight restoration, epsilon monotonicity) |
-| `tests/test_train.py` | 77 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers; early stopping; gradient clipping; weight decay (`make_param_groups`); seed reproducibility; AMP: disabled/CPU-noop/auto-disabled for Sophia+AdaHessian |
+| `tests/test_train.py` | 81 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers (incl. cosine_wr); early stopping; gradient clipping; weight decay (`make_param_groups`); seed reproducibility; AMP: disabled/CPU-noop/auto-disabled for Sophia+AdaHessian |
 | `tests/test_synthetic.py` | 52 | Registry completeness; loader shapes; label validity; NaN checks; standardisation; reproducibility; dataset-specific properties |
 | `tests/test_logger.py` | 30 | `TrainingLogger` session creation; `log_run` file format; `close` summary; edge cases |
 | `tests/test_checkpoints.py` | 5 | Checkpoint save and restore for best and final model states |
@@ -635,6 +635,7 @@ Synthetic tabular datasets are MLP-only. ResNet-18 and ViT raise a `ValueError` 
 | `cosine` | CosineAnnealingLR from initial LR to 0 |
 | `step` | StepLR — multiply by 0.1 every `epochs/3` steps |
 | `warmup_cosine` | Linear warmup for `--warmup-epochs` then cosine decay |
+| `cosine_wr` | CosineAnnealingWarmRestarts — T_0=epochs//3, T_mult=1 (~3 restarts per run) |
 
 #### Early stopping
 

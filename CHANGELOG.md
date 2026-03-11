@@ -4,6 +4,30 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 30 — Cosine Annealing with Warm Restarts (`cosine_wr`)
+
+### `train.py`
+
+- **`SCHEDULER_REGISTRY["cosine_wr"]`** — `CosineAnnealingWarmRestarts(T_0=max(1, epochs // 3), T_mult=1, eta_min=0.0)`. `T_0 = epochs // 3` gives ~3 restarts over a full run (standard SGDR setup); constant period (`T_mult=1`). No new CLI flags — `--scheduler cosine_wr` selects it.
+- Help string updated: `none | cosine | step | warmup_cosine | cosine_wr`.
+
+### `benchmark.py`
+
+- Help string updated to include `cosine_wr`. No other changes needed — `benchmark.py` imports `SCHEDULER_REGISTRY` from `train.py`.
+
+### Tests (`tests/test_train.py`)
+
+- `test_registry_has_all_keys` updated to include `"cosine_wr"`.
+- 4 new tests in `TestSchedulers`:
+  - `test_cosine_wr_lr_is_cyclic` — LR increases at least once over 9 epochs (restart confirmed)
+  - `test_cosine_wr_t0_derived_from_epochs` — `scheduler.T_0 == epochs // 3`
+  - `test_cosine_wr_short_run_no_crash` — `epochs=1` (T_0=1) doesn't raise
+  - `test_cosine_wr_in_run_training` — `history["learning_rates"]` shows cycling over 6 epochs
+
+Total tests: **360** (up from 356).
+
+---
+
 ## Round 29 — EMA Weights (`--ema-decay`)
 
 ### `train.py`

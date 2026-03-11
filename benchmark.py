@@ -512,7 +512,7 @@ def parse_args():
                    help="Root directory for training logs (default: logs/)")
     p.add_argument("--scheduler",    default="none",
                    choices=list(SCHEDULER_REGISTRY.keys()),
-                   help="LR scheduler: none | cosine | step | warmup_cosine")
+                   help="LR scheduler: none | cosine | step | warmup_cosine | cosine_wr")
     p.add_argument("--warmup-epochs", default=5, type=int,
                    help="Linear warmup epochs for warmup_cosine (default: 5)")
     p.add_argument("--patience",  default=0,   type=int,
