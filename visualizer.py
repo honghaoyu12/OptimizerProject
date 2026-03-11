@@ -358,6 +358,118 @@ def plot_benchmark(
 
 
 # ---------------------------------------------------------------------------
+# Per-layer gradient flow heatmap
+# ---------------------------------------------------------------------------
+
+def plot_grad_flow_heatmap(
+    results: dict,
+    save_path: str | None = "plots/grad_flow.png",
+) -> None:
+    """Plot a per-layer gradient magnitude heatmap for each benchmark run.
+
+    Each subplot is a 2-D heatmap where:
+      - **x-axis** = epoch
+      - **y-axis** = layer (input → output, bottom to top)
+      - **colour** = log10 of the mean gradient L2 norm for that layer/epoch
+
+    One row of subplots per (dataset, model) combination; one column per
+    optimizer series.  Useful for spotting vanishing or exploding gradients
+    across layers and epochs.
+
+    Silently skips runs whose history contains no ``"grad_norms"`` data.
+
+    Parameters
+    ----------
+    results : {(dataset_name, model_name, series_name): history_dict}
+        Same format as returned by ``run_benchmark()``.
+    save_path : str | None
+        File path to save the figure.  ``None`` or ``''`` disables saving.
+    """
+    # Filter to runs that have per-layer grad norm data
+    valid = {k: v for k, v in results.items() if v.get("grad_norms")}
+    if not valid:
+        print("\n  (Gradient flow heatmap skipped: no grad_norms found in results)")
+        return
+
+    combos = sorted({(k[0], k[1]) for k in valid})
+    series_per_combo: dict[tuple, list[str]] = {}
+    for ds, mdl, ser in valid:
+        series_per_combo.setdefault((ds, mdl), []).append(ser)
+    for combo in series_per_combo:
+        series_per_combo[combo] = sorted(series_per_combo[combo])
+
+    n_rows = len(combos)
+    n_cols = max(len(v) for v in series_per_combo.values())
+
+    fig_w = max(5, 3.5 * n_cols)
+    fig_h = max(4, 3.0 * n_rows)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    fig.suptitle("Per-Layer Gradient Flow (log₁₀ |grad|)", fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        series_list = series_per_combo[(ds_name, mdl_name)]
+        for col in range(n_cols):
+            ax = axes[row][col]
+            if col >= len(series_list):
+                ax.set_visible(False)
+                continue
+
+            series = series_list[col]
+            history = valid[(ds_name, mdl_name, series)]
+            grad_norms: dict[str, list[float]] = history["grad_norms"]
+
+            # Layer order: as stored (train.py records input→output)
+            layer_names = list(grad_norms.keys())
+            n_layers = len(layer_names)
+            n_epochs = max(len(grad_norms[ln]) for ln in layer_names)
+
+            # Build matrix (layers × epochs), log10 scale, clip floor at -6
+            matrix = np.full((n_layers, n_epochs), float("nan"))
+            for i, ln in enumerate(layer_names):
+                vals = grad_norms[ln]
+                for j, v in enumerate(vals):
+                    if v is not None and v > 0:
+                        matrix[i, j] = math.log10(v)
+                    elif v == 0:
+                        matrix[i, j] = -6.0
+
+            # Flip so input layer is at the bottom
+            matrix = matrix[::-1]
+            layer_labels = layer_names[::-1]
+
+            vmin = np.nanmin(matrix) if not np.all(np.isnan(matrix)) else -6
+            vmax = np.nanmax(matrix) if not np.all(np.isnan(matrix)) else 0
+
+            im = ax.imshow(
+                matrix,
+                aspect="auto",
+                origin="lower",
+                cmap="viridis",
+                vmin=vmin,
+                vmax=vmax,
+                interpolation="nearest",
+            )
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="log₁₀|grad|")
+
+            ax.set_title(f"{ds_name}/{mdl_name}\n{series}", fontsize=8)
+            ax.set_xlabel("Epoch", fontsize=8)
+            ax.set_ylabel("Layer", fontsize=8)
+            ax.set_xticks(range(n_epochs))
+            ax.set_xticklabels([str(e + 1) for e in range(n_epochs)], fontsize=7)
+            ax.set_yticks(range(n_layers))
+            ax.set_yticklabels(layer_labels, fontsize=7)
+            ax.tick_params(labelsize=7)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Gradient flow heatmap saved to {save_path}")
+
+    plt.show()
+
+# ---------------------------------------------------------------------------
 # LR sensitivity plot
 # ---------------------------------------------------------------------------
 

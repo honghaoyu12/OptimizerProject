@@ -282,9 +282,10 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
                  per-run for Sophia and AdaHessian with an explanatory message)
 --compile        apply torch.compile() to each model for kernel-fusion speedup; auto-disabled
                  per-run for Sophia and AdaHessian (create_graph=True incompatible)
---save-lr-plot   path for LR sensitivity figure (default: plots/lr_sensitivity.png; only generated when --lrs has ≥2 values)
---checkpoint-dir directory for per-run checkpoints
---report-path    save path for the Markdown benchmark report (default: reports/benchmark_report.md)
+--save-lr-plot      path for LR sensitivity figure (default: plots/lr_sensitivity.png; only generated when --lrs has ≥2 values)
+--save-grad-heatmap path for per-layer gradient flow heatmap (default: plots/grad_flow.png; '' to disable)
+--checkpoint-dir    directory for per-run checkpoints
+--report-path       save path for the Markdown benchmark report (default: reports/benchmark_report.md)
 ```
 
 ### 5. Device selection
@@ -320,7 +321,22 @@ python train.py --device mps     # Apple Silicon
 
 - **GradScaler occasionally skips a step** when it detects float16 overflow (it reduces the scale factor instead). This is normal AMP behaviour and self-corrects within a few steps.
 
-### 7. `torch.compile` (`--compile`)
+### 7. Per-layer gradient flow heatmap (`--save-grad-heatmap`)
+
+After every benchmark run, a gradient flow heatmap is saved to `plots/grad_flow.png` (disable with `--save-grad-heatmap ""`). Each subplot shows:
+
+- **x-axis** — epoch
+- **y-axis** — layer name (input layer at the bottom, output at the top)
+- **colour** — log₁₀ of the mean gradient L2 norm for that layer and epoch (`viridis` colourmap)
+
+One subplot per (dataset, model, optimizer) combination. At a glance you can see:
+- **Vanishing gradients** — early layers staying dark while later layers are bright
+- **Exploding gradients** — sudden bright columns across all layers
+- **Gradient flow imbalance** — patterns that explain why one optimizer converges faster than another
+
+The data comes directly from `history["grad_norms"]` already collected by `run_training()` — no additional training overhead.
+
+### 9. `torch.compile` (`--compile`)
 
 `--compile` calls `torch.compile(model)` before training, enabling PyTorch 2.x's kernel fusion and graph optimization. Expected speedup is ~20–40% on CUDA or MPS; there is no benefit on CPU.
 
@@ -328,7 +344,7 @@ python train.py --device mps     # Apple Silicon
 
 If `torch.compile` fails for any other reason (e.g. unsupported ops or platform restrictions), training falls back to eager mode with a warning — no crash.
 
-### 8. Resume from checkpoint (`--resume`)
+### 10. Resume from checkpoint (`--resume`)
 
 `--resume PATH` loads a `.pt` checkpoint saved by a previous run and continues training from where it left off:
 
@@ -344,7 +360,7 @@ The checkpoint contains `epoch`, `model_state_dict`, `optimizer_state_dict`, `me
 
 `run_training()` also accepts `resume_from=PATH` for programmatic use in notebooks or custom scripts.
 
-### 9. If the live plot window freezes
+### 11. If the live plot window freezes
 
 Some systems don't support interactive matplotlib windows well. Use `--no-plot` to skip it and save to a file instead:
 

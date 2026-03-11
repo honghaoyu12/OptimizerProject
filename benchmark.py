@@ -26,7 +26,7 @@ from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
 from report import generate_report
-from visualizer import plot_benchmark, plot_lr_sensitivity
+from visualizer import plot_benchmark, plot_lr_sensitivity, plot_grad_flow_heatmap
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +507,8 @@ def parse_args():
     p.add_argument("--save-lr-plot", default="plots/lr_sensitivity.png",
                    help="Path to save LR sensitivity figure ('' to disable; "
                         "only generated when --lrs has ≥2 values)")
+    p.add_argument("--save-grad-heatmap", default="plots/grad_flow.png",
+                   help="Path to save per-layer gradient flow heatmap ('' to disable)")
     return p.parse_args()
 
 
@@ -596,6 +598,10 @@ def main():
     # ── LR Sensitivity Plot ───────────────────────────────────────────────
     if args.lrs is not None and len(args.lrs) > 1 and args.save_lr_plot:
         plot_lr_sensitivity(results, save_path=args.save_lr_plot)
+
+    # ── Gradient Flow Heatmap ─────────────────────────────────────────────
+    if args.save_grad_heatmap:
+        plot_grad_flow_heatmap(results, save_path=args.save_grad_heatmap)
 
     # ── Report ────────────────────────────────────────────────────────────
     if args.report_path:

@@ -556,6 +556,23 @@ Total tests: 303 (up from 299). CI green on `main`.
 
 ---
 
+## Session 29 — Per-Layer Gradient Flow Heatmap
+
+**What we discussed:**
+- `history["grad_norms"]` already existed with per-layer per-epoch data; just needed a visualisation
+- Heatmap (imshow) chosen over line plots: shows all layers × epochs in a single glance, immediately reveals vanishing/exploding patterns
+- Implemented as a standalone `plot_grad_flow_heatmap()` to avoid widening the already-5-column benchmark grid
+- Zero gradient values clamped to log₁₀ = −6 to avoid −∞ in the colour scale
+
+**What was built:**
+- `visualizer.py`: `plot_grad_flow_heatmap(results, save_path)` — one subplot per (dataset, model, series); x=epoch, y=layer (input at bottom), colour=log₁₀|grad|; viridis colourmap; colourbar; skips runs with no grad_norms
+- `benchmark.py`: `--save-grad-heatmap` flag (default `plots/grad_flow.png`); import updated; called unconditionally after benchmark run
+- `tests/test_visualizer.py`: 6 new tests (TestGradFlowHeatmap) covering normal use, file creation, skip-on-missing-data, multi-optimizer, multi-layer, zero-value handling
+
+Total tests: 314 (up from 308). CI green on `main`.
+
+---
+
 ## Session 28 — `torch.compile` and Resume from Checkpoint
 
 **What we discussed:**
@@ -596,9 +613,10 @@ Total tests: 308 (up from 303). CI green on `main`.
 | Mixed precision | `--amp` in both CLIs — float16 autocast+GradScaler on CUDA; autocast only on MPS; auto-disabled for Sophia/AdaHessian |
 | torch.compile | `--compile` in both CLIs — static graph tracing speedup; auto-disabled for Sophia/AdaHessian; try/except fallback |
 | Resume from checkpoint | `--resume PATH` in `train.py`; `resume_from=PATH` in `run_training()` — restores model+optimizer state |
+| Gradient flow heatmap | `plot_grad_flow_heatmap()` in `visualizer.py`; `--save-grad-heatmap` in `benchmark.py`; x=epoch, y=layer, colour=log₁₀\|grad\| |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 308 passing |
+| Tests | 314 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |

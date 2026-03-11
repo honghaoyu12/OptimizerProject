@@ -4,6 +4,35 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 25 — Per-Layer Gradient Flow Heatmap
+
+### `visualizer.py`
+
+- **`plot_grad_flow_heatmap(results, save_path)`** — new function. Renders a 2-D heatmap per (dataset × model × optimizer series):
+  - x-axis = epoch, y-axis = layer (input at bottom, output at top), colour = log₁₀ of mean gradient L2 norm.
+  - Colourbar labelled `log₁₀|grad|`; `viridis` colourmap; zero gradients clamped to −6.
+  - Silently skips runs with no `"grad_norms"` key and prints a message.
+  - Grid layout: one row per (dataset, model) combination; one column per optimizer series; empty cells hidden.
+
+### `benchmark.py`
+
+- **`--save-grad-heatmap`** flag (default: `plots/grad_flow.png`, `''` disables). Generated unconditionally after every benchmark run that has per-layer norm data.
+- Import updated to include `plot_grad_flow_heatmap`.
+
+### `tests/test_visualizer.py`
+
+Six new tests (`TestGradFlowHeatmap`):
+- `test_runs_without_error` — completes without raising on valid data.
+- `test_saves_file` — file created at the requested path.
+- `test_skips_when_no_grad_norms` — no `grad_norms` key → skip message, no file.
+- `test_multi_optimizer` — three optimizer series → file saved correctly.
+- `test_multi_layer` — four layers × five epochs → file saved correctly.
+- `test_zero_gradient_values` — zero gradient entries (vanishing grad) handled without error.
+
+Total tests: 314 (up from 308).
+
+---
+
 ## Round 24 — `torch.compile` and Resume from Checkpoint
 
 ### `train.py`
