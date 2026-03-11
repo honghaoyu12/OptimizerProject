@@ -13,6 +13,7 @@ Optional CLI flags let you set shared hyperparameters without re-running:
 """
 
 import argparse
+import json
 import os
 from collections import OrderedDict
 
@@ -231,6 +232,39 @@ def get_device(preference: str) -> torch.device:
 # ---------------------------------------------------------------------------
 # Benchmark runner
 # ---------------------------------------------------------------------------
+
+_KEY_SEP = "||"
+
+
+def _save_results(results: dict, path: str) -> None:
+    """Serialize the results dict to JSON at *path*.
+
+    Tuple keys ``(dataset, model, series)`` are encoded as
+    ``"dataset||model||series"`` strings so they survive JSON round-trips.
+    All values must already be JSON-compatible (lists of floats / ints /
+    None, nested dicts).  The parent directory is created automatically.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    serializable = {
+        _KEY_SEP.join(k): v
+        for k, v in results.items()
+    }
+    with open(path, "w") as f:
+        json.dump(serializable, f, indent=2)
+
+
+def _load_results(path: str) -> dict:
+    """Deserialize a results JSON file written by :func:`_save_results`.
+
+    Returns a dict with tuple keys ``(dataset, model, series)``.
+    Raises ``FileNotFoundError`` if *path* does not exist.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Results file not found: {path}")
+    with open(path) as f:
+        raw = json.load(f)
+    return {tuple(k.split(_KEY_SEP)): v for k, v in raw.items()}
+
 
 def _aggregate_histories(histories: list[dict]) -> dict:
     """Aggregate N per-seed histories into mean ± std.
@@ -561,6 +595,12 @@ def parse_args():
     p.add_argument("--label-smoothing", default=0.0, type=float,
                    help="Label smoothing epsilon for CrossEntropyLoss (default: 0.0 = disabled). "
                         "Typical value: 0.1.")
+    p.add_argument("--save-results", default="", metavar="PATH",
+                   help="Save benchmark results dict to a JSON file after training "
+                        "(e.g. results/run.json). Skipped when empty (default).")
+    p.add_argument("--load-results", default="", metavar="PATH",
+                   help="Load a previously saved results JSON and skip training entirely. "
+                        "Plots and report are still generated from the loaded data.")
     return p.parse_args()
 
 
@@ -589,65 +629,85 @@ def main():
     else:
         print(f"  LR           : per-optimizer defaults")
 
-    # ── Interactive selection ─────────────────────────────────────────────
-    dataset_names   = prompt_multiselect("Select Datasets",   list(DATASET_REGISTRY.keys()))
-    model_descs     = [MODEL_REGISTRY[m]["description"] for m in MODEL_REGISTRY]
-    model_names     = prompt_multiselect("Select Models",     list(MODEL_REGISTRY.keys()), model_descs)
-    optimizer_names = prompt_multiselect("Select Optimizers", list(OPTIMIZER_REGISTRY.keys()))
-
-    print(f"\n  Selected datasets   : {', '.join(dataset_names)}")
-    print(f"  Selected models     : {', '.join(model_names)}")
-    print(f"  Selected optimizers : {', '.join(optimizer_names)}")
-
-    # ── Determine series names and colors ─────────────────────────────────
-    sweep_lr = args.lrs is not None and len(args.lrs) > 1
-    sweep_wd = len(args.weight_decays) > 1
-    if sweep_lr or sweep_wd:
-        lr_vals = args.lrs if args.lrs is not None else [None]  # None = per-optimizer default
-        series_names = []
-        for opt in optimizer_names:
-            for lr in lr_vals:
-                for wd in args.weight_decays:
-                    suffixes = []
-                    if sweep_lr and lr is not None:
-                        suffixes.append(f"lr={lr:g}")
-                    if sweep_wd:
-                        suffixes.append(f"wd={wd:g}")
-                    series_names.append(f"{opt} ({', '.join(suffixes)})" if suffixes else opt)
+    # ── Load or train ─────────────────────────────────────────────────────
+    if args.load_results:
+        print(f"\n  Loading results from {args.load_results} (skipping training)...")
+        results = _load_results(args.load_results)
+        # Recover dataset / model / series names from keys
+        dataset_names   = list(dict.fromkeys(k[0] for k in results))
+        model_names     = list(dict.fromkeys(k[1] for k in results))
+        series_names    = list(dict.fromkeys(k[2] for k in results))
         import matplotlib.pyplot as plt
         cmap = plt.get_cmap("tab20")
         opt_colors = {n: cmap(i % 20 / 20) for i, n in enumerate(series_names)}
+        print(f"  Loaded {len(results)} result(s): "
+              f"{', '.join(dataset_names)} | {', '.join(model_names)} | "
+              f"{', '.join(series_names)}")
     else:
-        series_names = optimizer_names
-        opt_colors = {n: OPTIMIZER_REGISTRY[n]["color"] for n in optimizer_names}
+        # ── Interactive selection ─────────────────────────────────────────
+        dataset_names   = prompt_multiselect("Select Datasets",   list(DATASET_REGISTRY.keys()))
+        model_descs     = [MODEL_REGISTRY[m]["description"] for m in MODEL_REGISTRY]
+        model_names     = prompt_multiselect("Select Models",     list(MODEL_REGISTRY.keys()), model_descs)
+        optimizer_names = prompt_multiselect("Select Optimizers", list(OPTIMIZER_REGISTRY.keys()))
 
-    # ── Run ───────────────────────────────────────────────────────────────
-    logger = TrainingLogger(log_dir=args.log_dir)
-    results = run_benchmark(
-        dataset_names, model_names, optimizer_names,
-        hidden_sizes=args.hidden_sizes,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        data_dir=args.data_dir,
-        device=device,
-        lrs=args.lrs,
-        logger=logger,
-        scheduler_name=args.scheduler,
-        warmup_epochs=args.warmup_epochs,
-        patience=args.patience,
-        min_delta=args.min_delta,
-        max_grad_norm=args.max_grad_norm,
-        weight_decays=args.weight_decays,
-        seed=args.seed,
-        checkpoint_dir=args.checkpoint_dir,
-        num_seeds=args.num_seeds,
-        target_acc=args.target_acc,
-        amp=args.amp,
-        compile_model=args.compile,
-        ema_decay=args.ema_decay,
-        label_smoothing=args.label_smoothing,
-    )
-    logger.close()
+        print(f"\n  Selected datasets   : {', '.join(dataset_names)}")
+        print(f"  Selected models     : {', '.join(model_names)}")
+        print(f"  Selected optimizers : {', '.join(optimizer_names)}")
+
+        # ── Determine series names and colors ─────────────────────────────
+        sweep_lr = args.lrs is not None and len(args.lrs) > 1
+        sweep_wd = len(args.weight_decays) > 1
+        if sweep_lr or sweep_wd:
+            lr_vals = args.lrs if args.lrs is not None else [None]  # None = per-optimizer default
+            series_names = []
+            for opt in optimizer_names:
+                for lr in lr_vals:
+                    for wd in args.weight_decays:
+                        suffixes = []
+                        if sweep_lr and lr is not None:
+                            suffixes.append(f"lr={lr:g}")
+                        if sweep_wd:
+                            suffixes.append(f"wd={wd:g}")
+                        series_names.append(f"{opt} ({', '.join(suffixes)})" if suffixes else opt)
+            import matplotlib.pyplot as plt
+            cmap = plt.get_cmap("tab20")
+            opt_colors = {n: cmap(i % 20 / 20) for i, n in enumerate(series_names)}
+        else:
+            series_names = optimizer_names
+            opt_colors = {n: OPTIMIZER_REGISTRY[n]["color"] for n in optimizer_names}
+
+        # ── Run ───────────────────────────────────────────────────────────
+        logger = TrainingLogger(log_dir=args.log_dir)
+        results = run_benchmark(
+            dataset_names, model_names, optimizer_names,
+            hidden_sizes=args.hidden_sizes,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            data_dir=args.data_dir,
+            device=device,
+            lrs=args.lrs,
+            logger=logger,
+            scheduler_name=args.scheduler,
+            warmup_epochs=args.warmup_epochs,
+            patience=args.patience,
+            min_delta=args.min_delta,
+            max_grad_norm=args.max_grad_norm,
+            weight_decays=args.weight_decays,
+            seed=args.seed,
+            checkpoint_dir=args.checkpoint_dir,
+            num_seeds=args.num_seeds,
+            target_acc=args.target_acc,
+            amp=args.amp,
+            compile_model=args.compile,
+            ema_decay=args.ema_decay,
+            label_smoothing=args.label_smoothing,
+        )
+        logger.close()
+
+        # ── Save results ──────────────────────────────────────────────────
+        if args.save_results:
+            _save_results(results, args.save_results)
+            print(f"\n  Results saved to {args.save_results}")
 
     # ── Plot ──────────────────────────────────────────────────────────────
     save_path = args.save_plot if args.save_plot else None

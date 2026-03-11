@@ -608,6 +608,21 @@ Total tests: **356** (up from 347).
 
 ---
 
+## Session 33 — Results Persistence (`--save-results` / `--load-results`)
+
+**What we discussed:**
+- Long runs (ResNet, CIFAR-10, 50 epochs, 5 seeds) can't be re-visualised without retraining — need to persist the results dict
+- `(dataset, model, series)` tuple keys are not JSON-native; encode as `"ds||model||series"` strings
+- `--load-results` skips interactive prompts and training entirely; proceeds directly to plot + report
+
+**What was built:**
+- `benchmark.py`: `_save_results(results, path)` — JSON serializer with `||`-encoded tuple keys, auto-creates parent dirs; `_load_results(path)` — deserializer back to tuple keys, raises `FileNotFoundError` cleanly; `--save-results PATH` flag; `--load-results PATH` flag; `main()` branches on `--load-results` to skip training
+- `tests/test_benchmark.py`: 5 new tests — file created, valid JSON, round-trip fidelity, `FileNotFoundError` for missing file, nested parent directory creation
+
+Total tests: **371**
+
+---
+
 ## Session 32 — LR Sensitivity Score
 
 **What we discussed:**

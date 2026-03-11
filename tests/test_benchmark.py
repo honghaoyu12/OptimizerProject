@@ -1,9 +1,13 @@
 """Tests for benchmark.py — LR sweep feature."""
 
+import json
 import torch
 import pytest
 
-from benchmark import run_benchmark, DATASET_REGISTRY, MODEL_REGISTRY, OPTIMIZER_REGISTRY
+from benchmark import (
+    run_benchmark, DATASET_REGISTRY, MODEL_REGISTRY, OPTIMIZER_REGISTRY,
+    _save_results, _load_results,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +123,55 @@ def test_target_acc_high_gives_none():
     results = _run(target_acc=1.0)
     hist = next(iter(results.values()))
     assert hist.get("target_accuracy_epoch") is None
+
+
+def test_save_results_creates_file(tmp_path):
+    """_save_results() writes a JSON file that exists on disk."""
+    results = _run()
+    save_path = str(tmp_path / "results.json")
+    _save_results(results, save_path)
+    assert (tmp_path / "results.json").exists()
+
+
+def test_save_results_valid_json(tmp_path):
+    """The written file is valid JSON (no tuple keys that would break json.load)."""
+    results = _run()
+    save_path = str(tmp_path / "results.json")
+    _save_results(results, save_path)
+    with open(save_path) as f:
+        data = json.load(f)
+    assert isinstance(data, dict)
+    assert len(data) == len(results)
+
+
+def test_load_results_round_trip(tmp_path):
+    """save → load preserves tuple keys and float list values."""
+    results = _run()
+    save_path = str(tmp_path / "results.json")
+    _save_results(results, save_path)
+    loaded = _load_results(save_path)
+
+    assert set(loaded.keys()) == set(results.keys())
+    for key in results:
+        orig_acc  = results[key]["test_acc"]
+        loaded_acc = loaded[key]["test_acc"]
+        assert len(orig_acc) == len(loaded_acc)
+        assert all(abs(a - b) < 1e-9 for a, b in zip(orig_acc, loaded_acc))
+
+
+def test_load_results_missing_file_raises():
+    """_load_results() raises FileNotFoundError for a non-existent path."""
+    with pytest.raises(FileNotFoundError):
+        _load_results("/nonexistent/path/results.json")
+
+
+def test_save_results_creates_parent_dirs(tmp_path):
+    """_save_results() creates nested parent directories automatically."""
+    save_path = str(tmp_path / "nested" / "dir" / "results.json")
+    results = _run()
+    _save_results(results, save_path)
+    import os
+    assert os.path.exists(save_path)
 
 
 def test_num_seeds_one_no_std_keys():

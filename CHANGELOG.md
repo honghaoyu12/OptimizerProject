@@ -4,6 +4,23 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 32 — Results Persistence (`--save-results` / `--load-results`)
+
+### `benchmark.py`
+
+- **`_save_results(results, path)`** — serializes the `(dataset, model, series)` tuple-keyed results dict to JSON. Tuple keys are encoded as `"dataset||model||series"` strings. Parent directories are created automatically.
+- **`_load_results(path)`** — deserializes the JSON back to the original tuple-keyed dict. Raises `FileNotFoundError` cleanly for missing paths.
+- **`--save-results PATH`** CLI flag — writes the results JSON after training completes. Empty string (default) skips the write.
+- **`--load-results PATH`** CLI flag — skips all interactive prompts and training; loads the JSON, recovers dataset/model/series names from the keys, and proceeds directly to plot + report generation.
+
+### Tests
+
+- `tests/test_benchmark.py`: **5 new tests** — file created, valid JSON, round-trip fidelity (keys + float values), `FileNotFoundError` for missing file, nested parent directory creation.
+
+Total tests: **371** (up from 366).
+
+---
+
 ## Round 31 — Label Smoothing (`--label-smoothing`)
 
 ### `train.py`
