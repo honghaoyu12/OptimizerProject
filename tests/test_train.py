@@ -985,3 +985,57 @@ class TestEMA:
         # Re-evaluate the model with its current weights; must match the recorded test_acc
         _, final_acc = evaluate(model, vl, crit, dev)
         assert abs(final_acc - history["test_acc"][-1]) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Stochastic Weight Averaging
+# ---------------------------------------------------------------------------
+
+class TestSWA:
+    """Tests for the swa_start parameter in run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_swa_disabled_gives_none(self):
+        """swa_start=None → history['swa_final_acc'] is None."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.SGD(model.parameters(), lr=0.01)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln,
+                               verbose=False, swa_start=None)
+        assert history["swa_final_acc"] is None
+
+    def test_swa_enabled_gives_float(self):
+        """swa_start=1 → history['swa_final_acc'] is a float in [0, 1]."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.SGD(model.parameters(), lr=0.01)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln,
+                               verbose=False, swa_start=1)
+        assert isinstance(history["swa_final_acc"], float)
+        assert 0.0 <= history["swa_final_acc"] <= 1.0
+
+    def test_swa_value_is_finite(self):
+        """SWA final accuracy is a finite float (not NaN or inf)."""
+        import math
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.SGD(model.parameters(), lr=0.01)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln,
+                               verbose=False, swa_start=2)
+        assert math.isfinite(history["swa_final_acc"])
+
+    def test_swa_does_not_corrupt_model_weights(self):
+        """SWA evaluation leaves the original model weights intact."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.SGD(model.parameters(), lr=0.01)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln,
+                               verbose=False, swa_start=1)
+        # Re-evaluate the model; must match the last raw test_acc
+        _, final_acc = evaluate(model, vl, torch.nn.CrossEntropyLoss(), dev)
+        assert abs(final_acc - history["test_acc"][-1]) < 1e-6

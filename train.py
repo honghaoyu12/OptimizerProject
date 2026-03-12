@@ -641,6 +641,7 @@ def run_training(
     amp: bool = False,
     resume_from: str | None = None,
     ema_decay: float | None = None,
+    swa_start: int | None = None,
 ) -> dict:
     """Train for *epochs* and return a history dict with per-epoch metrics.
 
@@ -706,6 +707,7 @@ def run_training(
         "early_stopped_epoch": None,
         "optimizer_states": {},
         "test_acc_ema": [],
+        "swa_final_acc": None,
     }
 
     # Initialise EMA state (float tensors only; updated in-place each batch)
@@ -713,6 +715,11 @@ def run_training(
     if ema_decay is not None:
         ema_state = {k: v.clone() for k, v in model.state_dict().items()
                      if v.is_floating_point()}
+
+    # Initialise SWA averaged model (starts accumulating at epoch swa_start)
+    swa_model = None
+    if swa_start is not None:
+        swa_model = torch.optim.swa_utils.AveragedModel(model)
 
     es = EarlyStopping(patience, min_delta)
     best_test_acc: float = -1.0
@@ -756,6 +763,9 @@ def run_training(
             ema_decay=ema_decay if ema_decay is not None else 0.999,
         )
         global_step_offset += len(epoch_result["step_losses"])
+
+        if swa_model is not None and epoch >= swa_start:
+            swa_model.update_parameters(model)
 
         train_loss = epoch_result["loss"]
         train_acc  = epoch_result["acc"]
@@ -854,6 +864,19 @@ def run_training(
             config=checkpoint_config,
         )
 
+    # SWA final evaluation: fix BatchNorm stats (if any), then evaluate once.
+    if swa_model is not None:
+        _has_bn = any(
+            isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
+            for m in model.modules()
+        )
+        if _has_bn:
+            torch.optim.swa_utils.update_bn(train_loader, swa_model, device=device)
+        _, swa_acc = evaluate(swa_model, test_loader, criterion, device)
+        history["swa_final_acc"] = swa_acc
+        if verbose:
+            print(f"  SWA final accuracy : {swa_acc * 100:.2f}%")
+
     return history
 
 
@@ -927,6 +950,10 @@ def parse_args():
     p.add_argument("--label-smoothing", default=0.0, type=float,
                    help="Label smoothing epsilon for CrossEntropyLoss (default: 0.0 = disabled). "
                         "Typical value: 0.1.")
+    p.add_argument("--swa-start", default=None, type=int, metavar="EPOCH",
+                   help="Epoch to begin Stochastic Weight Averaging (default: disabled). "
+                        "After this epoch weights are averaged across all subsequent epochs; "
+                        "a single evaluation is run after training completes.")
     return p.parse_args()
 
 
@@ -976,6 +1003,8 @@ def main():
         print(f"EMA decay     : {args.ema_decay}")
     if args.label_smoothing > 0.0:
         print(f"Label smoothing: {args.label_smoothing}")
+    if args.swa_start is not None:
+        print(f"SWA start      : epoch {args.swa_start}")
     if args.checkpoint_dir:
         print(f"Checkpoints   : {args.checkpoint_dir}/")
 
@@ -1052,6 +1081,7 @@ def main():
         "learning_rates": [],
         "early_stopped_epoch": None,
         "test_acc_ema": [],
+        "swa_final_acc": None,
     }
 
     # Initialise EMA shadow weights (float tensors only)
@@ -1059,6 +1089,10 @@ def main():
     if args.ema_decay is not None:
         ema_state = {k: v.clone() for k, v in model.state_dict().items()
                      if v.is_floating_point()}
+
+    swa_model_main = None
+    if args.swa_start is not None:
+        swa_model_main = torch.optim.swa_utils.AveragedModel(model)
 
     es = EarlyStopping(args.patience, args.min_delta)
     best_test_acc: float = -1.0
@@ -1097,6 +1131,9 @@ def main():
             ema_state=ema_state,
             ema_decay=args.ema_decay if args.ema_decay is not None else 0.999,
         )
+        if swa_model_main is not None and epoch >= args.swa_start:
+            swa_model_main.update_parameters(model)
+
         train_loss = epoch_result["loss"]
         train_acc  = epoch_result["acc"]
         test_loss, test_acc = evaluate(model, test_loader, criterion, device)
@@ -1178,6 +1215,18 @@ def main():
                      "test_acc":   history["test_acc"][last]},
             config=run_config,
         )
+
+    # SWA final evaluation
+    if swa_model_main is not None:
+        _has_bn = any(
+            isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
+            for m in model.modules()
+        )
+        if _has_bn:
+            torch.optim.swa_utils.update_bn(train_loader, swa_model_main, device=device)
+        _, swa_acc = evaluate(swa_model_main, test_loader, criterion, device)
+        history["swa_final_acc"] = swa_acc
+        print(f"SWA final accuracy : {swa_acc * 100:.2f}%")
 
     # Write logs
     config = {

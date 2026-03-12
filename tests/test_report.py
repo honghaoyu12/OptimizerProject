@@ -195,3 +195,19 @@ def test_report_label_smoothing_disabled_row():
     out = generate_report(results, _DEFAULT_CONFIG, save_path="")
     assert "Label smoothing" in out
     assert "disabled" in out
+
+
+def test_report_swa_column_present_when_swa_data_exists():
+    """history with 'swa_final_acc' set → 'SWA Acc' appears in the report."""
+    results = _make_results()
+    key = next(iter(results))
+    results[key]["swa_final_acc"] = 0.88
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "SWA Acc" in out
+
+
+def test_report_swa_column_absent_without_swa_data():
+    """Without 'swa_final_acc', SWA column not in report."""
+    results = _make_results()
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "SWA Acc" not in out

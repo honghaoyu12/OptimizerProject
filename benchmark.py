@@ -391,6 +391,7 @@ def run_benchmark(
     compile_model: bool = False,
     ema_decay: float | None = None,
     label_smoothing: float = 0.0,
+    swa_start: int | None = None,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -502,6 +503,7 @@ def run_benchmark(
                                 checkpoint_config=run_cfg,
                                 amp=amp,
                                 ema_decay=ema_decay,
+                                swa_start=swa_start,
                             )
                             seed_histories.append(history)
 
@@ -601,6 +603,9 @@ def parse_args():
     p.add_argument("--load-results", default="", metavar="PATH",
                    help="Load a previously saved results JSON and skip training entirely. "
                         "Plots and report are still generated from the loaded data.")
+    p.add_argument("--swa-start", default=None, type=int, metavar="EPOCH",
+                   help="Epoch to begin Stochastic Weight Averaging (default: disabled). "
+                        "SWA is evaluated once after training completes.")
     return p.parse_args()
 
 
@@ -622,6 +627,8 @@ def main():
         print(f"  EMA decay      : {args.ema_decay}")
     if args.label_smoothing > 0.0:
         print(f"  Label smoothing: {args.label_smoothing}")
+    if args.swa_start is not None:
+        print(f"  SWA start      : epoch {args.swa_start}")
     if args.lrs is not None and len(args.lrs) == 1:
         print(f"  LR (global)  : {args.lrs[0]}")
     elif args.lrs is not None:
@@ -701,6 +708,7 @@ def main():
             compile_model=args.compile,
             ema_decay=args.ema_decay,
             label_smoothing=args.label_smoothing,
+            swa_start=args.swa_start,
         )
         logger.close()
 
@@ -745,6 +753,7 @@ def main():
             "num_seeds": args.num_seeds,
             "target_acc": args.target_acc,
             "label_smoothing": args.label_smoothing,
+            "swa_start": args.swa_start,
         }
         generate_report(results, report_cfg, save_path=args.report_path)
         print(f"\n  Report saved to {args.report_path}")
