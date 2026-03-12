@@ -4,6 +4,47 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 34 — Stochastic Weight Averaging (`--swa-start`)
+
+### `train.py`
+
+- `run_training(swa_start=None)` — builds `torch.optim.swa_utils.AveragedModel` at epoch `swa_start`; calls `update_parameters(model)` each subsequent epoch; runs `update_bn(train_loader, swa_model)` after training for models with BatchNorm layers (no-op for MLP); evaluates the averaged model once and stores `history["swa_final_acc"]` (float or `None`).
+- `"swa_final_acc": None` added to history init.
+- Same logic wired into `main()`'s inline training loop (`swa_model_main`).
+- `--swa-start EPOCH` CLI flag; banner printed when set.
+
+### `benchmark.py`
+
+- `run_benchmark(swa_start=None)` — passes through to `run_training()`.
+- `--swa-start EPOCH` CLI flag; banner; added to `report_cfg`.
+
+### `report.py`
+
+- Results Overview table gains a **SWA Acc (%)** column when any run in a combo has `swa_final_acc` set; absent otherwise (same conditional pattern as EMA columns).
+
+### Tests
+
+- `tests/test_train.py`: **`TestSWA`** (4 tests) — disabled gives `None`; enabled gives float in `[0, 1]`; value is finite; model weights not corrupted after SWA evaluation.
+- `tests/test_report.py`: 2 new tests — SWA column present when `swa_final_acc` set; absent without SWA data.
+
+Total tests: **379** (up from 373).
+
+---
+
+## Round 33 — Learning Rate Column in Per-Run CSVs
+
+### `logger.py`
+
+- `learning_rate` column added to both the `[epoch-wise]` section of `.log` files and the `_epochs.csv` clean CSV. Uses `history.get("learning_rates", [])` — writes an empty string when the key is absent (graceful fallback).
+
+### Tests
+
+- `tests/test_logger.py`: updated `test_epochs_csv_header` for new fieldname set; 2 new tests — values match `history["learning_rates"]`; empty string when key absent.
+
+Total tests: **373** (up from 371).
+
+---
+
 ## Round 32 — Results Persistence (`--save-results` / `--load-results`)
 
 ### `benchmark.py`

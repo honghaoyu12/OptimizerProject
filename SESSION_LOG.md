@@ -608,6 +608,40 @@ Total tests: **356** (up from 347).
 
 ---
 
+## Session 35 — Stochastic Weight Averaging (`--swa-start`)
+
+**What we discussed:**
+- SWA is a natural complement to EMA (different averaging strategy: uniform vs exponential) and cosine_wr (SWA was originally proposed alongside cyclic LR)
+- `torch.optim.swa_utils.AveragedModel` and `update_bn` are PyTorch built-ins
+- Key difference from EMA: needs `update_bn()` pass through training data after training (to fix BatchNorm running stats); evaluation is once at end, not every epoch → `swa_final_acc` is a scalar not a list
+- BN detection: `isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))` — no-op for MLP, required for ResNet
+
+**What was built:**
+- `train.py`: `run_training(swa_start=None)` — AveragedModel init, per-epoch `update_parameters()`, post-loop `update_bn()` + single evaluation → `history["swa_final_acc"]`; same logic in `main()` as `swa_model_main`; `--swa-start EPOCH` flag + banner
+- `benchmark.py`: `run_benchmark(swa_start=None)`; `--swa-start` flag; passed to `run_training()`; added to `report_cfg`
+- `report.py`: `SWA Acc (%)` column in Results table — conditional on `swa_final_acc` presence (same pattern as EMA)
+- `tests/test_train.py`: `TestSWA` (4 tests)
+- `tests/test_report.py`: 2 new SWA column tests
+
+Total tests: **379**
+
+---
+
+## Session 34 — Learning Rate Column in Per-Run CSVs
+
+**What we discussed:**
+- `run_summary.json` already captured `learning_rates` (it's a flat list); the gap was only in the CSV outputs
+- Fix: add `learning_rate` column to both `.log` [epoch-wise] section and `_epochs.csv`
+- Graceful fallback: empty string when `learning_rates` key absent
+
+**What was built:**
+- `logger.py`: `learning_rate` column in `.log` epoch section and `_epochs.csv`; `learning_rates = history.get("learning_rates", [])` for safe fallback
+- `tests/test_logger.py`: updated `test_epochs_csv_header`; 2 new tests
+
+Total tests: **373**
+
+---
+
 ## Session 33 — Results Persistence (`--save-results` / `--load-results`)
 
 **What we discussed:**

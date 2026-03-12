@@ -198,6 +198,8 @@ python train.py --model vit --dataset cifar10 --optimizer adamw --epochs 15 \
 --ema-decay      exponential moving average decay for model weights (e.g. 0.999); EMA weights
                  are evaluated each epoch alongside raw weights; None = disabled (default)
 --label-smoothing label smoothing epsilon for CrossEntropyLoss (default: 0.0); typical value 0.1
+--swa-start      epoch to begin Stochastic Weight Averaging (default: disabled); weights are
+                 averaged uniformly across all subsequent epochs; evaluated once after training
 ```
 
 ### 4. Run the interactive benchmark
@@ -293,6 +295,12 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 5 --save-plot my_benchmark.p
 --ema-decay      exponential moving average decay for model weights (e.g. 0.999); EMA weights are
                  evaluated each epoch alongside raw weights; None = disabled (default)
 --label-smoothing label smoothing epsilon for CrossEntropyLoss (default: 0.0); typical value 0.1
+--swa-start      epoch to begin Stochastic Weight Averaging (default: disabled); weights are
+                 averaged uniformly across all subsequent epochs; evaluated once after training
+--save-results   save benchmark results dict to a JSON file after training (e.g. results/run.json);
+                 skipped when empty (default)
+--load-results   load a previously saved results JSON and skip training entirely; plots and report
+                 are still generated from the loaded data
 --checkpoint-dir    directory for per-run checkpoints
 --report-path       save path for the Markdown benchmark report (default: reports/benchmark_report.md)
 ```
@@ -393,7 +401,29 @@ Typical values: `0.999` (slow EMA, very smooth), `0.9` (fast EMA, less lag). The
 
 Disabled by default (`None`); fully backward-compatible.
 
-### 13. Resume from checkpoint (`--resume`)
+### 13. Stochastic Weight Averaging (`--swa-start`)
+
+`--swa-start EPOCH` activates Stochastic Weight Averaging (SWA). Starting at the specified epoch, an `AveragedModel` accumulates a uniform running average of the model's weights across all subsequent epochs:
+
+```
+swa_weights = (swa_weights × n + current_weights) / (n + 1)
+```
+
+After training completes, BatchNorm running statistics are recalculated with a single pass through the training data (`update_bn()`), then the averaged model is evaluated once on the test set. The result is stored as `history["swa_final_acc"]` and shown as a **SWA Acc (%)** column in the benchmark report when present.
+
+SWA pairs naturally with cyclic LR schedules (`--scheduler cosine_wr`) — the original SGDR paper proposed SWA as a way to average the models visited at the bottom of each cosine cycle. For models without BatchNorm (MLP), `update_bn()` is skipped automatically.
+
+```bash
+# SWA starting at epoch 5 of a 10-epoch cosine_wr run
+python train.py --epochs 10 --scheduler cosine_wr --swa-start 5
+
+# Benchmark with SWA
+printf "1\n1\n3,5\n" | python benchmark.py --epochs 20 --swa-start 10 --scheduler cosine_wr
+```
+
+Disabled by default (`None`); fully backward-compatible.
+
+### 14. Resume from checkpoint (`--resume`)
 
 `--resume PATH` loads a `.pt` checkpoint saved by a previous run and continues training from where it left off:
 
@@ -409,7 +439,23 @@ The checkpoint contains `epoch`, `model_state_dict`, `optimizer_state_dict`, `me
 
 `run_training()` also accepts `resume_from=PATH` for programmatic use in notebooks or custom scripts.
 
-### 13. If the live plot window freezes
+### 15. Results persistence (`--save-results` / `--load-results`)
+
+Long benchmark runs (ResNet on CIFAR-10, 50 epochs, 5 seeds) currently vanish when the process exits. `--save-results` serialises the results dict to JSON immediately after training; `--load-results` loads it back and skips training entirely — plots and reports are regenerated from the saved data.
+
+```bash
+# Train once, save results
+printf "3\n2\n3,5\n" | python benchmark.py --epochs 50 --num-seeds 5 --seed 0 \
+  --save-results results/cifar_resnet.json
+
+# Re-plot and re-report without retraining
+python benchmark.py --load-results results/cifar_resnet.json \
+  --save-plot plots/new_view.png --report-path reports/updated.md
+```
+
+The `(dataset, model, series)` tuple keys are encoded as `"dataset||model||series"` strings for JSON compatibility and decoded back to tuples on load.
+
+### 16. If the live plot window freezes
 
 Some systems don't support interactive matplotlib windows well. Use `--no-plot` to skip it and save to a file instead:
 
@@ -474,7 +520,7 @@ printf "1\n1\n3,5\n" | python benchmark.py --epochs 10 --num-seeds 3 --seed 0
 
 ## Testing
 
-The project ships with **290 pytest tests** covering every major component.
+The project ships with **379 pytest tests** covering every major component.
 
 ### Run the tests locally
 
@@ -493,7 +539,7 @@ pytest tests/test_optimizers.py::TestShampoo -v
 pytest tests/test_train.py::TestTrainingLoop::test_loss_decreases_over_epochs -v
 ```
 
-Expected output: `303 passed` in a few seconds (all on CPU, no downloads needed).
+Expected output: `379 passed` in a few seconds (all on CPU, no downloads needed).
 
 ### Test files
 
@@ -502,14 +548,14 @@ Expected output: `303 passed` in a few seconds (all on CPU, no downloads needed)
 | `tests/test_models.py` | 17 | MLP, ResNet18, ViT forward passes; output shapes; patch size assertion |
 | `tests/test_optimizers.py` | 55 | Registry completeness; finite weights after one step for all 20 optimizers; optimizer-specific state and behaviour |
 | `tests/test_metrics.py` | 9 | Hessian trace (type, finiteness, positivity, NaN on no-param model); sharpness (type, non-negativity, weight restoration, epsilon monotonicity) |
-| `tests/test_train.py` | 81 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers (incl. cosine_wr); early stopping; gradient clipping; weight decay (`make_param_groups`); seed reproducibility; AMP: disabled/CPU-noop/auto-disabled for Sophia+AdaHessian |
+| `tests/test_train.py` | 89 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers (incl. cosine_wr); early stopping; gradient clipping; weight decay (`make_param_groups`); seed reproducibility; AMP: disabled/CPU-noop/auto-disabled for Sophia+AdaHessian; EMA weights; label smoothing; SWA |
 | `tests/test_synthetic.py` | 52 | Registry completeness; loader shapes; label validity; NaN checks; standardisation; reproducibility; dataset-specific properties |
-| `tests/test_logger.py` | 30 | `TrainingLogger` session creation; `log_run` file format; `close` summary; edge cases |
+| `tests/test_logger.py` | 32 | `TrainingLogger` session creation; `log_run` file format incl. `learning_rate` column; `close` summary; edge cases |
 | `tests/test_checkpoints.py` | 5 | Checkpoint save and restore for best and final model states |
 | `tests/test_plot_from_logs.py` | 9 | Log-replay plotting from saved session directories |
 | `tests/test_lr_finder.py` | 7 | History keys/shape; monotone LR schedule; weight/LR state restoration; suggestion range; AdaHessian compatibility |
-| `tests/test_benchmark.py` | 11 | `run_benchmark()` LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes; multi-seed: single result per combo, std keys added, no agg-std for num_seeds=1; convergence: target_acc=0.0 populates epoch, target_acc=1.0 gives None |
-| `tests/test_report.py` | 13 | `generate_report()`: returns string, file creation, content parity, all section headers, empty save_path skips file, multi-optimizer rankings, ± std shown when test_acc_std present; convergence columns present; em-dash when None; ± shown when std present |
+| `tests/test_benchmark.py` | 16 | `run_benchmark()` LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes; multi-seed: single result per combo, std keys added, no agg-std for num_seeds=1; convergence: target_acc=0.0 populates epoch, target_acc=1.0 gives None; results persistence: save/load round-trip, valid JSON, FileNotFoundError, nested dirs |
+| `tests/test_report.py` | 19 | `generate_report()`: returns string, file creation, content parity, all section headers, empty save_path skips file, multi-optimizer rankings, convergence columns, em-dash when None, ± std, EMA columns present/absent, label smoothing row, SWA column present/absent |
 | `tests/test_visualizer.py` | 5 | `plot_lr_sensitivity()`: runs without error, saves file, skips gracefully when no config_lr, multi-optimizer, std error bands |
 
 ### CI pipeline
