@@ -186,3 +186,46 @@ def test_num_seeds_one_no_std_keys():
     # Exclude the pre-existing native grad_norm_std key
     agg_std_keys = [k for k in hist if k.endswith("_std") and k != "grad_norm_std"]
     assert agg_std_keys == []
+
+
+def test_num_seeds_adds_final_seeds_list():
+    """num_seeds=2 → aggregated history contains 'test_acc_final_seeds' with 2 values."""
+    results = _run(num_seeds=2, seed=0)
+    hist = next(iter(results.values()))
+    seeds_list = hist.get("test_acc_final_seeds")
+    assert seeds_list is not None, "test_acc_final_seeds key missing"
+    assert len(seeds_list) == 2, f"Expected 2 seed values, got {len(seeds_list)}"
+    assert all(isinstance(v, float) for v in seeds_list)
+
+
+def test_num_seeds_one_no_final_seeds_list():
+    """num_seeds=1 → 'test_acc_final_seeds' key should NOT be present (raw history)."""
+    results = _run(num_seeds=1)
+    hist = next(iter(results.values()))
+    assert "test_acc_final_seeds" not in hist, (
+        "test_acc_final_seeds should not exist for single-seed runs"
+    )
+
+
+def test_num_seeds_convergence_profile_aggregated():
+    """num_seeds=2 → aggregated history has 'convergence_epochs' and 'convergence_times' dicts."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "convergence_epochs" in hist, "convergence_epochs key missing"
+    assert "convergence_times"  in hist, "convergence_times key missing"
+    # Keys must be the five threshold labels produced by _CONV_THRESHOLDS
+    from train import _CONV_THRESHOLDS
+    expected_keys = {f"{int(t * 100)}%" for t in _CONV_THRESHOLDS}
+    assert set(hist["convergence_epochs"].keys()) == expected_keys
+    assert set(hist["convergence_times"].keys())  == expected_keys
+
+
+def test_convergence_profile_single_seed():
+    """Single-seed run still populates convergence_epochs / convergence_times dicts."""
+    results = _run(num_seeds=1, epochs=2)
+    hist = next(iter(results.values()))
+    assert "convergence_epochs" in hist
+    assert "convergence_times"  in hist
+    from train import _CONV_THRESHOLDS
+    expected_keys = {f"{int(t * 100)}%" for t in _CONV_THRESHOLDS}
+    assert set(hist["convergence_epochs"].keys()) == expected_keys

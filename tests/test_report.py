@@ -211,3 +211,60 @@ def test_report_swa_column_absent_without_swa_data():
     results = _make_results()
     out = generate_report(results, _DEFAULT_CONFIG, save_path="")
     assert "SWA Acc" not in out
+
+
+def test_report_convergence_profile_section_present():
+    """history with 'convergence_epochs' → 'Convergence Profile' section appears."""
+    results = _make_results()
+    key = next(iter(results))
+    results[key]["convergence_epochs"] = {"50%": 1, "75%": 2, "90%": None, "95%": None, "99%": None}
+    results[key]["convergence_times"]  = {"50%": 0.5, "75%": 1.0, "90%": None, "95%": None, "99%": None}
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "Convergence Profile" in out
+    assert "Ep to 50%" in out
+    assert "Ep to 90%" in out
+
+
+def test_report_convergence_profile_absent_without_data():
+    """Without 'convergence_epochs', the Convergence Profile section is omitted."""
+    results = _make_results()
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "Convergence Profile" not in out
+
+
+def test_report_stat_sig_section_present_when_seeds_gt1():
+    """num_seeds > 1 + test_acc_final_seeds → 'Statistical Significance' appears."""
+    results = _make_results(optimizers=("Adam", "SGD"))
+    for key in results:
+        results[key]["test_acc_final_seeds"] = [0.85, 0.84, 0.86]
+    cfg = {**_DEFAULT_CONFIG, "num_seeds": 3}
+    out = generate_report(results, cfg, save_path="")
+    assert "Statistical Significance" in out
+    assert "p-value" in out.lower() or "p-values" in out.lower() or "paired t-test" in out.lower()
+
+
+def test_report_stat_sig_absent_when_single_seed():
+    """num_seeds=1 → 'Statistical Significance' section omitted even with 2 optimizers."""
+    results = _make_results(optimizers=("Adam", "SGD"))
+    cfg = {**_DEFAULT_CONFIG, "num_seeds": 1}
+    out = generate_report(results, cfg, save_path="")
+    assert "Statistical Significance" not in out
+
+
+def test_paired_ttest_returns_float():
+    """_paired_ttest returns a float in [0, 1] for valid equal-length inputs."""
+    from report import _paired_ttest
+    p = _paired_ttest([0.90, 0.92, 0.88], [0.80, 0.82, 0.79])
+    assert p is None or (isinstance(p, float) and 0.0 <= p <= 1.0)
+
+
+def test_paired_ttest_returns_none_for_mismatched_lengths():
+    """_paired_ttest returns None when list lengths differ."""
+    from report import _paired_ttest
+    assert _paired_ttest([0.9, 0.8], [0.9]) is None
+
+
+def test_paired_ttest_returns_none_for_single_element():
+    """_paired_ttest returns None for lists with < 2 elements."""
+    from report import _paired_ttest
+    assert _paired_ttest([0.9], [0.8]) is None

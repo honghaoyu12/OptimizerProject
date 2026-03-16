@@ -57,6 +57,12 @@ from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, 
 # second-order gradient graph, so AMP must be disabled when these are in use.
 _AMP_INCOMPATIBLE = (Sophia, AdaHessian)
 
+# Accuracy thresholds used for the convergence profile.  For each threshold T
+# the training loop records the first epoch and wall-clock time at which
+# test_acc >= T.  All five milestones are tracked simultaneously so that a
+# single run tells you "when did it hit 50%, 75%, 90%, 95%, 99%?".
+_CONV_THRESHOLDS = [0.50, 0.75, 0.90, 0.95, 0.99]
+
 # torch.compile traces the computation graph statically.  Optimizers that call
 # backward(create_graph=True) build a dynamic higher-order graph that the
 # compiler cannot capture correctly, leading to incorrect gradients or crashes.
@@ -796,6 +802,12 @@ def run_training(
         "optimizer_states": {},
         "test_acc_ema": [],
         "swa_final_acc": None,
+        # Per-threshold convergence profile (see _CONV_THRESHOLDS).
+        # Keys are "50%", "75%", "90%", "95%", "99%"; values are the epoch
+        # (1-based int) / wall-clock seconds at which that accuracy was first
+        # reached, or None if never reached.
+        "convergence_epochs": {f"{int(t * 100)}%": None for t in _CONV_THRESHOLDS},
+        "convergence_times":  {f"{int(t * 100)}%": None for t in _CONV_THRESHOLDS},
     }
 
     # ── EMA setup ──────────────────────────────────────────────────────────
@@ -923,6 +935,13 @@ def run_training(
         if history["target_accuracy_epoch"] is None and test_acc >= target_acc:
             history["target_accuracy_epoch"] = epoch
             history["target_accuracy_time"] = elapsed
+
+        # Convergence profile — record the first epoch each milestone is crossed.
+        for _thresh in _CONV_THRESHOLDS:
+            _tkey = f"{int(_thresh * 100)}%"
+            if history["convergence_epochs"][_tkey] is None and test_acc >= _thresh:
+                history["convergence_epochs"][_tkey] = epoch
+                history["convergence_times"][_tkey]  = elapsed
 
         # Hessian / sharpness
         if compute_hessian and hessian_batch is not None:

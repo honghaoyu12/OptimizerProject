@@ -1039,3 +1039,62 @@ class TestSWA:
         # Re-evaluate the model; must match the last raw test_acc
         _, final_acc = evaluate(model, vl, torch.nn.CrossEntropyLoss(), dev)
         assert abs(final_acc - history["test_acc"][-1]) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Convergence profile
+# ---------------------------------------------------------------------------
+
+class TestConvergenceProfile:
+    """Tests for per-threshold convergence tracking in run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_convergence_keys_present(self):
+        """run_training() always returns 'convergence_epochs' and 'convergence_times' dicts."""
+        from train import _CONV_THRESHOLDS
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "convergence_epochs" in history
+        assert "convergence_times"  in history
+        expected_keys = {f"{int(t * 100)}%" for t in _CONV_THRESHOLDS}
+        assert set(history["convergence_epochs"].keys()) == expected_keys
+        assert set(history["convergence_times"].keys())  == expected_keys
+
+    def test_convergence_values_are_none_or_positive(self):
+        """Each threshold value is either None (not reached) or a positive number."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for thresh_key, val in history["convergence_epochs"].items():
+            assert val is None or (isinstance(val, int) and val >= 1), (
+                f"convergence_epochs['{thresh_key}'] = {val!r}"
+            )
+        for thresh_key, val in history["convergence_times"].items():
+            assert val is None or (isinstance(val, float) and val > 0), (
+                f"convergence_times['{thresh_key}'] = {val!r}"
+            )
+
+    def test_lower_thresholds_not_later_than_higher(self):
+        """If both a lower and higher threshold are reached, the lower must be reached first."""
+        from train import _CONV_THRESHOLDS
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln, verbose=False)
+        thresholds = sorted(_CONV_THRESHOLDS)
+        epoch_vals = [history["convergence_epochs"].get(f"{int(t * 100)}%") for t in thresholds]
+        reached = [(t, v) for t, v in zip(thresholds, epoch_vals) if v is not None]
+        for i in range(len(reached) - 1):
+            assert reached[i][1] <= reached[i + 1][1], (
+                f"Lower threshold {reached[i][0]} reached later "
+                f"({reached[i][1]}) than {reached[i + 1][0]} ({reached[i + 1][1]})"
+            )

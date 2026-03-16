@@ -15,6 +15,34 @@ from datetime import datetime
 from visualizer import _compute_lr_sensitivity
 
 
+def _paired_ttest(a: list[float], b: list[float]) -> float | None:
+    """Run a paired t-test between two lists of per-seed accuracies.
+
+    Returns the two-tailed p-value, or None when scipy is unavailable or the
+    lists are too short / identical.  A small p-value (< 0.05) means the
+    difference in means is unlikely to be due to random seed variation alone.
+
+    Parameters
+    ----------
+    a, b:
+        Per-seed final test accuracies for two optimizers.  Both lists must
+        have the same length and at least 2 elements.
+
+    Returns
+    -------
+    float | None
+        Two-tailed p-value in [0, 1], or None on failure.
+    """
+    if len(a) != len(b) or len(a) < 2:
+        return None
+    try:
+        from scipy.stats import ttest_rel  # optional dependency
+        _, p = ttest_rel(a, b)
+        return float(p)
+    except (ImportError, ValueError):
+        return None
+
+
 def generate_report(
     results: dict,
     config: dict,
@@ -35,7 +63,12 @@ def generate_report(
 
         Optional keys: ``early_stopped_epoch`` (int | None),
         ``test_acc_ema`` (list[float]), ``swa_final_acc`` (float | None),
-        ``test_acc_std`` (list[float] — present after multi-seed aggregation).
+        ``test_acc_std`` (list[float] — present after multi-seed aggregation),
+        ``test_acc_final_seeds`` (list[float] — per-seed final accuracies for
+        statistical significance testing),
+        ``convergence_epochs`` / ``convergence_times`` (dict[str, float|None]
+        — epoch / seconds to reach each accuracy milestone, e.g. ``"90%"``).
+
     config:
         Benchmark settings. Recognised keys:
         ``epochs``, ``batch_size``, ``scheduler``, ``weight_decays``,
@@ -263,6 +296,87 @@ def generate_report(
                     f"| {opt} | {s['range']:.2f} | {s['std']:.2f} "
                     f"| {s['best_lr']:g} | {s['worst_lr']:g} | {s['n_lrs']} |"
                 )
+            lines.append("")
+
+    # ------------------------------------------------------------------
+    # Section 4.7 — Convergence Profile
+    # Rows: one per optimizer.  Columns: epoch first reached each threshold
+    # (50%, 75%, 90%, 95%, 99%).  "—" when the threshold was never reached.
+    # ------------------------------------------------------------------
+    from train import _CONV_THRESHOLDS  # noqa: PLC0415 (localised import)
+    thresh_labels = [f"{int(t * 100)}%" for t in _CONV_THRESHOLDS]
+
+    # Only emit this section when at least one run has convergence_epochs data
+    any_conv = any(bool(hist.get("convergence_epochs")) for hist in results.values())
+    if any_conv:
+        lines += ["## Convergence Profile", ""]
+        lines += [
+            "Epoch at which each optimizer **first** reached each accuracy milestone.",
+            "Values averaged over seeds when `--num-seeds > 1`.  '—' = never reached.",
+            "",
+        ]
+        for ds, mdl in combos:
+            lines += [f"### {ds} / {mdl}", ""]
+            header = "| Optimizer |" + "".join(f" Ep to {t} |" for t in thresh_labels)
+            sep    = "|---|" + "---|" * len(thresh_labels)
+            lines += [header, sep]
+            for (d, m, series), hist in sorted(results.items()):
+                if d != ds or m != mdl:
+                    continue
+                conv_eps = hist.get("convergence_epochs", {})
+                cells = ""
+                for t in thresh_labels:
+                    val = conv_eps.get(t)
+                    cells += f" {val:.1f} |" if val is not None else " — |"
+                lines.append(f"| {series} |{cells}")
+            lines.append("")
+
+    # ------------------------------------------------------------------
+    # Section 4.8 — Statistical Significance
+    # Only shown when num_seeds > 1 and per-seed final accuracies are stored.
+    # Produces a p-value matrix: for every ordered pair of optimizers on every
+    # (dataset, model) combo, shows the paired t-test p-value.
+    # ------------------------------------------------------------------
+    has_seeds_data = any(
+        bool(hist.get("test_acc_final_seeds"))
+        for hist in results.values()
+    )
+    if num_seeds > 1 and has_seeds_data:
+        lines += ["## Statistical Significance", ""]
+        lines += [
+            f"Paired t-test p-values for every optimizer pair ({num_seeds} seeds).",
+            "**p < 0.05** indicates the performance difference is unlikely due to "
+            "random initialisation alone.",
+            "",
+        ]
+        for ds, mdl in combos:
+            combo_series = sorted(
+                {s for (d, m, s) in results if d == ds and m == mdl}
+            )
+            if len(combo_series) < 2:
+                continue
+            lines += [f"### {ds} / {mdl}", ""]
+            header = "| |" + "".join(f" {s} |" for s in combo_series)
+            sep    = "|---|" + "---|" * len(combo_series)
+            lines += [header, sep]
+            for s_a in combo_series:
+                row = f"| **{s_a}** |"
+                for s_b in combo_series:
+                    if s_a == s_b:
+                        row += " — |"
+                    else:
+                        seeds_a = (results.get((ds, mdl, s_a)) or {}).get("test_acc_final_seeds", [])
+                        seeds_b = (results.get((ds, mdl, s_b)) or {}).get("test_acc_final_seeds", [])
+                        p = _paired_ttest(seeds_a, seeds_b)
+                        if p is None:
+                            row += " N/A |"
+                        elif p < 0.001:
+                            row += f" **{p:.3f}** |"
+                        elif p < 0.05:
+                            row += f" *{p:.3f}* |"
+                        else:
+                            row += f" {p:.3f} |"
+                lines.append(row)
             lines.append("")
 
     # ------------------------------------------------------------------

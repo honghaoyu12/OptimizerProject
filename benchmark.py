@@ -405,6 +405,40 @@ def _aggregate_histories(histories: list[dict]) -> dict:
                 aggregated_opt[state_key] = arr.mean(axis=0).tolist()
     result["optimizer_states"] = aggregated_opt
 
+    # ── Per-seed final accuracies (for statistical significance testing) ───
+    # Store the raw final test_acc from each seed as a plain list so that
+    # callers can run paired t-tests or other statistics on them later.
+    final_accs = [
+        h.get("test_acc", [])[-1] if h.get("test_acc") else float("nan")
+        for h in histories
+    ]
+    result["test_acc_final_seeds"] = final_accs
+
+    # ── Convergence profile aggregation ───────────────────────────────────
+    # For each threshold key ("50%", "75%", …), average the epoch / time
+    # values over seeds that actually reached that milestone.  Seeds that
+    # never reached a threshold contribute None and are excluded from the
+    # mean.  If no seed reached a threshold the result is None.
+    for key in ("convergence_epochs", "convergence_times"):
+        seed_dicts = [h.get(key, {}) for h in histories]
+        all_thresh_keys: set = set()
+        for d in seed_dicts:
+            all_thresh_keys.update(d.keys())
+        merged: dict = {}
+        for thresh_key in sorted(all_thresh_keys):
+            vals = [
+                d[thresh_key]
+                for d in seed_dicts
+                if thresh_key in d and d[thresh_key] is not None
+            ]
+            if vals:
+                avg = float(np.mean(vals))
+                # Round epoch counts to one decimal; times keep full precision
+                merged[thresh_key] = round(avg, 1) if key == "convergence_epochs" else round(avg, 2)
+            else:
+                merged[thresh_key] = None
+        result[key] = merged
+
     for key in histories[0]:
         if key not in result:
             result[key] = histories[0][key]
