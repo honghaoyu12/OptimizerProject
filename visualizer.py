@@ -1030,3 +1030,199 @@ def plot_efficiency_frontier(
         print(f"\n  Efficiency frontier saved to {save_path}")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Weight distance from initialisation
+# ---------------------------------------------------------------------------
+
+def plot_weight_distance(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/weight_distance.png",
+) -> None:
+    """Plot how far each optimizer moves the weights from their initial values.
+
+    One subplot per (dataset × model) combination.  Each line shows the
+    **global** weight distance (sum of per-layer L2 distances) vs epoch.
+    Error bands are drawn when seed-averaged per-layer std data is present.
+
+    A rapidly rising curve early in training indicates large, aggressive
+    updates (typical of adaptive methods at high LR).  A slow, steady rise
+    is characteristic of SGD with momentum.  Optimisers that find flat minima
+    often end up *further* from init at convergence.
+
+    Silently skips runs whose ``history["weight_distance"]`` is empty.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of optimizer/series names (for colour lookup)
+    opt_colors     : {series_name: colour}
+    save_path      : file path to save the figure; ``None`` / ``''`` disables.
+    """
+    combos = [(ds, mdl) for ds in dataset_names for mdl in model_names]
+    n_rows = len(combos)
+    if n_rows == 0:
+        return
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(9, 4.5 * n_rows), squeeze=False)
+    fig.suptitle("Weight Distance from Initialisation (global L2)", fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Epoch", fontsize=9)
+        ax.set_ylabel("Σ ||w_t − w_0||₂ (all layers)", fontsize=9)
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history = results[key3]
+            wd_dict = history.get("weight_distance", {})
+            if not wd_dict:
+                continue
+
+            # Sum per-layer distances into one global trace
+            n_epochs = max(len(v) for v in wd_dict.values() if v)
+            global_dist = [0.0] * n_epochs
+            for layer_vals in wd_dict.values():
+                for e, v in enumerate(layer_vals[:n_epochs]):
+                    if not math.isnan(v):
+                        global_dist[e] += v
+
+            epochs = list(range(1, n_epochs + 1))
+            color  = opt_colors[opt_name]
+            ax.plot(epochs, global_dist, "o-", color=color, label=opt_name,
+                    linewidth=1.8, markersize=4)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Weight distance figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Hyperparameter robustness heatmap (LR × WD → final test accuracy)
+# ---------------------------------------------------------------------------
+
+def plot_hp_heatmap(
+    results: dict,
+    save_path: str | None = "plots/hp_heatmap.png",
+) -> None:
+    """2-D heatmap of final test accuracy over an LR × weight-decay grid.
+
+    One subplot per (dataset, model, base-optimizer) triple.  Each cell shows
+    the final test accuracy for that (lr, wd) combination, colour-coded from
+    low (purple) to high (yellow, viridis).  Optimisers whose accuracy stays
+    high across the full grid are *robust* to hyperparameter choice; those
+    with a narrow bright ridge are *sensitive*.
+
+    Requires ``history["config_lr"]`` and ``history["config_wd"]`` to be set
+    (``run_benchmark()`` stores these automatically).  Silently skips combos
+    that have fewer than 2 unique LR values *or* fewer than 2 unique WD values.
+
+    Parameters
+    ----------
+    results  : {(dataset_name, model_name, series_name): history_dict}
+    save_path: file path to save the figure; ``None`` / ``''`` disables.
+    """
+    from collections import defaultdict
+
+    # Group by (ds, mdl, base_opt) → {(lr, wd): final_acc}
+    # Base optimizer name is the part before the first " (" in the series name.
+    groups: dict = defaultdict(dict)
+    for (ds, mdl, series), hist in results.items():
+        lr = hist.get("config_lr")
+        wd = hist.get("config_wd")
+        if lr is None or wd is None:
+            continue
+        final_acc = hist.get("test_acc", [])
+        if not final_acc:
+            continue
+        base_opt = series.split(" (")[0]
+        groups[(ds, mdl, base_opt)][(lr, wd)] = final_acc[-1] * 100
+
+    if not groups:
+        print("\n  (HP heatmap skipped: config_lr / config_wd not found in results)")
+        return
+
+    # Keep only combos with >= 2 unique values on each axis
+    valid = {
+        k: v for k, v in groups.items()
+        if len({lr for lr, _ in v}) >= 2 and len({wd for _, wd in v}) >= 2
+    }
+    if not valid:
+        print("\n  (HP heatmap skipped: need ≥ 2 LR values and ≥ 2 WD values)")
+        return
+
+    n_plots = len(valid)
+    n_cols  = min(3, n_plots)
+    n_rows  = math.ceil(n_plots / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(5.5 * n_cols, 4.5 * n_rows),
+                             squeeze=False)
+    fig.suptitle("HP Robustness: LR × Weight Decay → Final Test Accuracy (%)",
+                 fontsize=13, fontweight="bold")
+
+    for idx, ((ds, mdl, base_opt), cell_map) in enumerate(sorted(valid.items())):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row][col]
+
+        lrs = sorted({lr for lr, _ in cell_map})
+        wds = sorted({wd for _, wd in cell_map})
+
+        # Build 2-D accuracy matrix (rows = LR, cols = WD)
+        matrix = np.full((len(lrs), len(wds)), float("nan"))
+        for (lr, wd), acc in cell_map.items():
+            r = lrs.index(lr)
+            c = wds.index(wd)
+            matrix[r, c] = acc
+
+        im = ax.imshow(matrix, aspect="auto", origin="lower",
+                       cmap="viridis", vmin=0, vmax=100)
+        fig.colorbar(im, ax=ax, label="Test Acc (%)", fraction=0.046, pad=0.04)
+
+        ax.set_xticks(range(len(wds)))
+        ax.set_xticklabels([f"{w:g}" for w in wds], fontsize=8, rotation=30, ha="right")
+        ax.set_yticks(range(len(lrs)))
+        ax.set_yticklabels([f"{l:g}" for l in lrs], fontsize=8)
+        ax.set_xlabel("Weight Decay", fontsize=9)
+        ax.set_ylabel("Learning Rate", fontsize=9)
+        ax.set_title(f"{ds} / {mdl}\n{base_opt}", fontsize=9)
+
+        # Annotate each cell with its accuracy value
+        for r in range(len(lrs)):
+            for c in range(len(wds)):
+                val = matrix[r, c]
+                if not math.isnan(val):
+                    ax.text(c, r, f"{val:.1f}", ha="center", va="center",
+                            fontsize=7.5,
+                            color="white" if val < 60 else "black")
+
+    # Hide unused subplot cells
+    for idx in range(len(valid), n_rows * n_cols):
+        r, c = divmod(idx, n_cols)
+        axes[r][c].set_visible(False)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  HP heatmap saved to {save_path}")
+
+    plt.show()

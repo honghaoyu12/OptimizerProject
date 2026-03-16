@@ -53,7 +53,8 @@ from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    save_checkpoint, set_seed)
 from report import generate_report
 from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity_scores,
-                        plot_grad_flow_heatmap, plot_optimizer_states, plot_efficiency_frontier)
+                        plot_grad_flow_heatmap, plot_optimizer_states, plot_efficiency_frontier,
+                        plot_weight_distance, plot_hp_heatmap)
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +358,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         arr = np.array([v[:min_len] for v in non_empty], dtype=float)
         result["step_losses"] = arr.mean(axis=0).tolist()
 
-    for key in ("weight_norms", "grad_norms"):
+    for key in ("weight_norms", "grad_norms", "weight_distance"):
         dicts = [h.get(key, {}) for h in histories]
         all_subkeys: set = set()
         for d in dicts:
@@ -630,6 +631,7 @@ def run_benchmark(
                             else seed_histories[0]
                         )
                         aggregated["config_lr"] = effective_lr
+                        aggregated["config_wd"] = wd
                         results[(ds_name, mdl_name, series_name)] = aggregated
 
     return results
@@ -714,6 +716,11 @@ def parse_args():
     p.add_argument("--swa-start", default=None, type=int, metavar="EPOCH",
                    help="Epoch to begin Stochastic Weight Averaging (default: disabled). "
                         "SWA is evaluated once after training completes.")
+    p.add_argument("--save-weight-distance", default="plots/weight_distance.png",
+                   help="Path to save weight-distance-from-init figure ('' to disable)")
+    p.add_argument("--save-hp-heatmap", default="plots/hp_heatmap.png",
+                   help="Path to save LR × WD robustness heatmap ('' to disable; "
+                        "only generated when both --lrs and --weight-decays have ≥2 values)")
     p.add_argument("--auto-lr", action="store_true",
                    help="Run a learning-rate range test (LR finder) before each "
                         "(optimizer, dataset, model) combination and use the found LR "
@@ -859,6 +866,17 @@ def main():
     # ── Efficiency Frontier ────────────────────────────────────────────────
     if args.save_frontier:
         plot_efficiency_frontier(results, save_path=args.save_frontier)
+
+    # ── Weight Distance from Init ──────────────────────────────────────────
+    if args.save_weight_distance:
+        plot_weight_distance(results, dataset_names, model_names, series_names,
+                             opt_colors, save_path=args.save_weight_distance)
+
+    # ── HP Robustness Heatmap ─────────────────────────────────────────────
+    if (args.save_hp_heatmap
+            and args.lrs is not None and len(args.lrs) >= 2
+            and len(args.weight_decays) >= 2):
+        plot_hp_heatmap(results, save_path=args.save_hp_heatmap)
 
     # ── Report ────────────────────────────────────────────────────────────
     if args.report_path:

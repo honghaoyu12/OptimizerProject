@@ -7,7 +7,7 @@ import pytest
 from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity_scores,
                         plot_grad_flow_heatmap, plot_optimizer_states,
                         plot_efficiency_frontier, _pareto_frontier,
-                        _compute_lr_sensitivity)
+                        _compute_lr_sensitivity, plot_weight_distance, plot_hp_heatmap)
 
 
 # ---------------------------------------------------------------------------
@@ -533,3 +533,100 @@ class TestGenGapAndStepsPanel:
         plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam", "SGD"],
                        {"Adam": "#1f77b4", "SGD": "#ff7f0e"}, save_path=str(out))
         assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# plot_weight_distance
+# ---------------------------------------------------------------------------
+
+def _make_weight_dist_results(series=("Adam",), n_epochs=3, layers=("L1(784→256)", "L2(256→10)")):
+    results = {}
+    for s in series:
+        results[("MNIST", "MLP", s)] = {
+            "test_acc": [0.80 + 0.05 * e for e in range(n_epochs)],
+            "weight_distance": {ln: [0.1 * (e + 1) for e in range(n_epochs)] for ln in layers},
+        }
+    return results
+
+
+class TestWeightDistancePlot:
+    """Tests for plot_weight_distance()."""
+
+    def test_runs_without_error(self, tmp_path):
+        results = _make_weight_dist_results()
+        plot_weight_distance(results, ["MNIST"], ["MLP"], ["Adam"],
+                             {"Adam": "#1f77b4"}, save_path=str(tmp_path / "wd.png"))
+
+    def test_saves_file(self, tmp_path):
+        results = _make_weight_dist_results()
+        out = tmp_path / "wd.png"
+        plot_weight_distance(results, ["MNIST"], ["MLP"], ["Adam"],
+                             {"Adam": "#1f77b4"}, save_path=str(out))
+        assert out.exists()
+
+    def test_multi_optimizer(self, tmp_path):
+        results = _make_weight_dist_results(series=("Adam", "SGD"))
+        out = tmp_path / "wd_multi.png"
+        plot_weight_distance(results, ["MNIST"], ["MLP"], ["Adam", "SGD"],
+                             {"Adam": "#1f77b4", "SGD": "#ff7f0e"}, save_path=str(out))
+        assert out.exists()
+
+    def test_missing_weight_distance_no_error(self, tmp_path):
+        """Runs missing weight_distance key → skipped gracefully, file still created."""
+        results = {("MNIST", "MLP", "Adam"): {"test_acc": [0.9]}}
+        out = tmp_path / "wd_empty.png"
+        plot_weight_distance(results, ["MNIST"], ["MLP"], ["Adam"],
+                             {"Adam": "#1f77b4"}, save_path=str(out))
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# plot_hp_heatmap
+# ---------------------------------------------------------------------------
+
+def _make_hp_results(lrs=(1e-3, 1e-2), wds=(0.0, 1e-4), opt="Adam"):
+    results = {}
+    for lr in lrs:
+        for wd in wds:
+            series = f"{opt} (lr={lr:g}, wd={wd:g})"
+            results[("MNIST", "MLP", series)] = {
+                "test_acc":  [0.90 + lr * 10 - wd * 100],
+                "config_lr": lr,
+                "config_wd": wd,
+            }
+    return results
+
+
+class TestHPHeatmap:
+    """Tests for plot_hp_heatmap()."""
+
+    def test_runs_without_error(self, tmp_path):
+        results = _make_hp_results()
+        plot_hp_heatmap(results, save_path=str(tmp_path / "hp.png"))
+
+    def test_saves_file(self, tmp_path):
+        results = _make_hp_results()
+        out = tmp_path / "hp.png"
+        plot_hp_heatmap(results, save_path=str(out))
+        assert out.exists()
+
+    def test_multi_optimizer(self, tmp_path):
+        results = _make_hp_results(opt="Adam")
+        results.update(_make_hp_results(opt="SGD"))
+        out = tmp_path / "hp_multi.png"
+        plot_hp_heatmap(results, save_path=str(out))
+        assert out.exists()
+
+    def test_skips_when_only_one_lr(self, tmp_path, capsys):
+        """Only 1 unique LR → heatmap skipped with a message."""
+        results = _make_hp_results(lrs=(1e-3,))  # single LR
+        plot_hp_heatmap(results, save_path=str(tmp_path / "hp_skip.png"))
+        out = capsys.readouterr()
+        assert "skipped" in out.out.lower()
+
+    def test_skips_when_no_config_wd(self, tmp_path, capsys):
+        """Missing config_wd → heatmap skipped with a message."""
+        results = {("MNIST", "MLP", "Adam"): {"test_acc": [0.9], "config_lr": 1e-3}}
+        plot_hp_heatmap(results, save_path=str(tmp_path / "hp_nowd.png"))
+        out = capsys.readouterr()
+        assert "skipped" in out.out.lower()

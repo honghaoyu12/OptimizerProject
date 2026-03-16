@@ -518,6 +518,34 @@ def weight_norms(model: nn.Module, layer_names: list[str]) -> dict[str, float]:
     return norms
 
 
+def weight_distances(
+    model: nn.Module,
+    layer_names: list[str],
+    init_weights: dict[str, torch.Tensor],
+) -> dict[str, float]:
+    """L2 distance of each Linear layer's weight from its initial value.
+
+    Parameters
+    ----------
+    model       : current model (weights have been updated by the optimizer)
+    layer_names : ordered layer display names (same list used by weight_norms)
+    init_weights: {layer_name: weight_tensor_at_epoch_0} — snapshot taken
+                  before training begins; must be on the same device as model
+
+    Returns
+    -------
+    dict mapping layer_name -> ||w_t - w_0||_2  (scalar float)
+    """
+    dists = {}
+    idx = 0
+    for module in model.modules():
+        if isinstance(module, nn.Linear):
+            name = layer_names[idx]
+            dists[name] = (module.weight - init_weights[name]).norm().item()
+            idx += 1
+    return dists
+
+
 # ---------------------------------------------------------------------------
 # Train / evaluate
 # ---------------------------------------------------------------------------
@@ -786,8 +814,13 @@ def run_training(
     history: dict = {
         "train_loss": [], "test_loss": [],
         "train_acc":  [], "test_acc":  [],
-        "weight_norms": {n: [] for n in layer_names},
-        "grad_norms":   {n: [] for n in layer_names},
+        "weight_norms":    {n: [] for n in layer_names},
+        "grad_norms":      {n: [] for n in layer_names},
+        # ||w_t - w_0||_2 per layer — how far the optimizer has moved each
+        # layer's weights from their random initialisation.  High values early
+        # in training indicate large, aggressive updates (typical of adaptive
+        # methods); a slow, steady rise is characteristic of SGD.
+        "weight_distance": {n: [] for n in layer_names},
         "time_elapsed": [],
         "target_accuracy_epoch": None,
         "target_accuracy_time": None,
@@ -824,6 +857,17 @@ def run_training(
     if ema_decay is not None:
         ema_state = {k: v.clone() for k, v in model.state_dict().items()
                      if v.is_floating_point()}
+
+    # ── Initial weight snapshot (for weight_distance tracking) ────────────
+    # Capture each Linear layer's weight *before* any training step so that
+    # we can compute ||w_t - w_0||_2 each epoch.  Stored on the same device
+    # as the model so subtraction later is device-safe.
+    _init_linear_weights: dict[str, torch.Tensor] = {}
+    _widx = 0
+    for _mod in model.modules():
+        if isinstance(_mod, nn.Linear):
+            _init_linear_weights[layer_names[_widx]] = _mod.weight.detach().clone()
+            _widx += 1
 
     # ── SWA setup ──────────────────────────────────────────────────────────
     # AveragedModel maintains a running uniform average of model weights.
@@ -899,8 +943,9 @@ def run_training(
             model.load_state_dict(orig_state)
             history["test_acc_ema"].append(ema_acc)
 
-        w_norms = weight_norms(model, layer_names)
-        elapsed = time.time() - start_time
+        w_norms  = weight_norms(model, layer_names)
+        w_dists  = weight_distances(model, layer_names, _init_linear_weights)
+        elapsed  = time.time() - start_time
 
         history["train_loss"].append(train_loss)
         history["test_loss"].append(test_loss)
@@ -916,6 +961,7 @@ def run_training(
         for n in layer_names:
             history["weight_norms"][n].append(w_norms.get(n, float("nan")))
             history["grad_norms"][n].append(epoch_result["grad_norms_per_layer"].get(n, float("nan")))
+            history["weight_distance"][n].append(w_dists.get(n, float("nan")))
 
         # Optimizer internal state snapshot
         _states = _extract_optimizer_states(model, optimizer, layer_names)

@@ -263,3 +263,31 @@ def test_auto_lr_ignored_when_lrs_set():
     results = _run(auto_lr=False, lrs=[explicit_lr], epochs=1)
     hist = next(iter(results.values()))
     assert abs(hist.get("config_lr", 0) - explicit_lr) < 1e-9
+
+
+def test_config_wd_stored_in_history():
+    """run_benchmark() stores config_wd in each result history."""
+    results = _run(weight_decays=[0.0], epochs=1)
+    hist = next(iter(results.values()))
+    assert "config_wd" in hist
+    assert hist["config_wd"] == 0.0
+
+
+def test_weight_distance_key_present():
+    """Single-seed run has 'weight_distance' dict with per-layer lists."""
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "weight_distance" in hist
+    assert isinstance(hist["weight_distance"], dict)
+    # Each layer list has one entry per epoch
+    for layer_vals in hist["weight_distance"].values():
+        assert len(layer_vals) == 2
+
+
+def test_weight_distance_aggregated_for_multi_seed():
+    """num_seeds=2 → weight_distance is aggregated (averaged) across seeds."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "weight_distance" in hist
+    for layer_vals in hist["weight_distance"].values():
+        assert len(layer_vals) == 2

@@ -1149,3 +1149,64 @@ class TestStepsAtEpochEnd:
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
         history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
         assert history["steps_at_epoch_end"][-1] == len(history["step_losses"])
+
+
+# ---------------------------------------------------------------------------
+# Weight distance from initialisation
+# ---------------------------------------------------------------------------
+
+class TestWeightDistanceFromInit:
+    """Tests for history['weight_distance'] added by run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_key_present(self):
+        """run_training() always returns 'weight_distance' dict in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "weight_distance" in history
+        assert isinstance(history["weight_distance"], dict)
+
+    def test_same_layer_keys_as_weight_norms(self):
+        """weight_distance has the same layer keys as weight_norms."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert set(history["weight_distance"].keys()) == set(history["weight_norms"].keys())
+
+    def test_length_equals_epochs_per_layer(self):
+        """Each layer list has one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        for layer, vals in history["weight_distance"].items():
+            assert len(vals) == n_epochs, f"Layer {layer}: expected {n_epochs} entries, got {len(vals)}"
+
+    def test_starts_near_zero_and_grows(self):
+        """Epoch-1 distance is close to 0; distance grows (or stays) over epochs."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln, verbose=False)
+        for layer, vals in history["weight_distance"].items():
+            assert vals[-1] >= vals[0], (
+                f"Layer {layer}: distance shrank from {vals[0]:.4f} to {vals[-1]:.4f}"
+            )
+
+    def test_all_values_non_negative(self):
+        """L2 distances are always >= 0."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.SGD(model.parameters(), lr=0.01)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for layer, vals in history["weight_distance"].items():
+            for v in vals:
+                assert v >= 0, f"Negative distance for {layer}: {v}"
