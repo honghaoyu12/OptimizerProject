@@ -7,7 +7,8 @@ import pytest
 from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity_scores,
                         plot_grad_flow_heatmap, plot_optimizer_states,
                         plot_efficiency_frontier, _pareto_frontier,
-                        _compute_lr_sensitivity, plot_weight_distance, plot_hp_heatmap)
+                        _compute_lr_sensitivity, plot_weight_distance, plot_hp_heatmap,
+                        plot_grad_snr)
 
 
 # ---------------------------------------------------------------------------
@@ -630,3 +631,132 @@ class TestHPHeatmap:
         plot_hp_heatmap(results, save_path=str(tmp_path / "hp_nowd.png"))
         out = capsys.readouterr()
         assert "skipped" in out.out.lower()
+
+
+# ---------------------------------------------------------------------------
+# ECE column in plot_benchmark
+# ---------------------------------------------------------------------------
+
+def _make_benchmark_results_with_ece(opt_name="Adam"):
+    """Minimal benchmark results dict that includes 'ece' per-epoch data."""
+    return {
+        ("MNIST", "MLP", opt_name): {
+            "train_loss":  [0.5, 0.4, 0.3],
+            "test_loss":   [0.6, 0.5, 0.4],
+            "train_acc":   [0.80, 0.85, 0.90],
+            "test_acc":    [0.75, 0.80, 0.85],
+            "learning_rates": [1e-3, 1e-3, 1e-3],
+            "steps_at_epoch_end": [100, 200, 300],
+            "ece": [0.12, 0.10, 0.08],
+        }
+    }
+
+
+class TestECEPanel:
+    """Tests for the ECE column (column 7) in plot_benchmark()."""
+
+    def test_runs_without_error(self, tmp_path):
+        """plot_benchmark() with ece data completes without error."""
+        results = _make_benchmark_results_with_ece()
+        plot_benchmark(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(tmp_path / "bench_ece.png"),
+        )
+
+    def test_saves_file(self, tmp_path):
+        """plot_benchmark() with ece data saves a file."""
+        results = _make_benchmark_results_with_ece()
+        out = tmp_path / "bench_ece.png"
+        plot_benchmark(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_runs_without_ece_key(self, tmp_path):
+        """plot_benchmark() without 'ece' key in history does not raise."""
+        results = {
+            ("MNIST", "MLP", "Adam"): {
+                "train_loss":  [0.5],
+                "test_loss":   [0.6],
+                "train_acc":   [0.80],
+                "test_acc":    [0.75],
+                "learning_rates": [1e-3],
+                "steps_at_epoch_end": [100],
+            }
+        }
+        plot_benchmark(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(tmp_path / "bench_no_ece.png"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# plot_grad_snr
+# ---------------------------------------------------------------------------
+
+def _make_grad_snr_results(opt_name="Adam"):
+    """Minimal results dict with 'grad_snr' per-layer data."""
+    return {
+        ("MNIST", "MLP", opt_name): {
+            "grad_snr": {
+                "Linear-0": [5.2, 6.1, 7.0],
+                "Linear-1": [3.8, 4.2, 4.9],
+            }
+        }
+    }
+
+
+class TestGradSNRPlot:
+    """Tests for plot_grad_snr()."""
+
+    def test_runs_without_error(self, tmp_path):
+        results = _make_grad_snr_results()
+        plot_grad_snr(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(tmp_path / "grad_snr.png"),
+        )
+
+    def test_saves_file(self, tmp_path):
+        results = _make_grad_snr_results()
+        out = tmp_path / "grad_snr.png"
+        plot_grad_snr(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_multi_optimizer(self, tmp_path):
+        results = _make_grad_snr_results("Adam")
+        results.update(_make_grad_snr_results("SGD"))
+        out = tmp_path / "grad_snr_multi.png"
+        plot_grad_snr(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam", "SGD"],
+            opt_colors={"Adam": "#1f77b4", "SGD": "#ff7f0e"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_skips_empty_grad_snr_gracefully(self, tmp_path):
+        """Results with empty grad_snr → no error, file still created."""
+        results = {("MNIST", "MLP", "Adam"): {"grad_snr": {}}}
+        out = tmp_path / "grad_snr_empty.png"
+        plot_grad_snr(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()

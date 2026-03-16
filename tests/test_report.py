@@ -268,3 +268,46 @@ def test_paired_ttest_returns_none_for_single_element():
     """_paired_ttest returns None for lists with < 2 elements."""
     from report import _paired_ttest
     assert _paired_ttest([0.9], [0.8]) is None
+
+
+def test_report_ece_column_present_when_ece_in_history():
+    """Results table contains 'Final ECE' column when history has 'ece' list."""
+    results = {
+        ("MNIST", "MLP", "Adam"): {
+            "train_loss":  [0.5, 0.4],
+            "train_acc":   [0.80, 0.85],
+            "test_acc":    [0.75, 0.82],
+            "time_elapsed": [1.0, 2.0],
+            "early_stopped_epoch": None,
+            "ece": [0.12, 0.08],
+        }
+    }
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    assert "Final ECE" in out
+
+
+def test_report_ece_value_shown_in_table():
+    """ECE value from the last epoch appears in the results table."""
+    results = {
+        ("MNIST", "MLP", "Adam"): {
+            "train_loss":  [0.5],
+            "train_acc":   [0.80],
+            "test_acc":    [0.75],
+            "time_elapsed": [1.0],
+            "early_stopped_epoch": None,
+            "ece": [0.1234],
+        }
+    }
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    # The ECE is formatted to 4 decimal places in the table
+    assert "0.1234" in out
+
+
+def test_report_ece_dash_when_missing():
+    """'—' is shown in the ECE column when history has no 'ece' key."""
+    results = _make_results()  # no 'ece' in history
+    out = generate_report(results, _DEFAULT_CONFIG, save_path="")
+    # The column is still present with a dash placeholder
+    assert "Final ECE" in out
+    assert "—" in out
+

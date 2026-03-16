@@ -153,6 +153,7 @@ class TestTrainingLoop:
         assert set(result.keys()) == {
             "loss", "acc", "grad_norms_per_layer",
             "grad_norm_global", "grad_norm_std", "grad_norm_before_clip", "step_losses",
+            "grad_snr_per_layer",
         }
 
     def test_train_one_epoch_loss_finite(self):
@@ -1210,3 +1211,110 @@ class TestWeightDistanceFromInit:
         for layer, vals in history["weight_distance"].items():
             for v in vals:
                 assert v >= 0, f"Negative distance for {layer}: {v}"
+
+
+# ---------------------------------------------------------------------------
+# Gradient SNR
+# ---------------------------------------------------------------------------
+
+class TestGradientSNR:
+    """Tests for history['grad_snr'] produced by run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_key_present(self):
+        """run_training() returns 'grad_snr' dict in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "grad_snr" in history
+        assert isinstance(history["grad_snr"], dict)
+
+    def test_same_layer_keys_as_grad_norms(self):
+        """grad_snr has the same layer keys as grad_norms."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert set(history["grad_snr"].keys()) == set(history["grad_norms"].keys())
+
+    def test_values_positive(self):
+        """All per-layer SNR values are positive (mean_norm / (std_norm + eps) > 0)."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for layer, vals in history["grad_snr"].items():
+            for v in vals:
+                assert v > 0, f"Non-positive SNR for layer {layer}: {v}"
+
+    def test_length_equals_epochs_per_layer(self):
+        """Each layer list has one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        for layer, vals in history["grad_snr"].items():
+            assert len(vals) == n_epochs, (
+                f"Layer {layer}: expected {n_epochs} SNR values, got {len(vals)}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Calibration (ECE)
+# ---------------------------------------------------------------------------
+
+class TestCalibration:
+    """Tests for history['ece'] (Expected Calibration Error) from run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_ece_key_present(self):
+        """run_training() always returns 'ece' list in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "ece" in history
+        assert isinstance(history["ece"], list)
+
+    def test_ece_one_per_epoch(self):
+        """'ece' has exactly one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        assert len(history["ece"]) == n_epochs
+
+    def test_ece_in_unit_interval(self):
+        """All ECE values are in [0, 1]."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for v in history["ece"]:
+            assert 0.0 <= v <= 1.0, f"ECE out of [0,1]: {v}"
+
+    def test_compute_ece_exported(self):
+        """compute_ece() is importable from train and returns a float in [0, 1]."""
+        from train import compute_ece
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        _, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        device = torch.device("cpu")
+        ece = compute_ece(model, test_loader, device)
+        assert isinstance(ece, float)
+        assert 0.0 <= ece <= 1.0

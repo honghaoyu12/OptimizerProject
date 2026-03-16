@@ -67,7 +67,9 @@ def generate_report(
         ``test_acc_final_seeds`` (list[float] — per-seed final accuracies for
         statistical significance testing),
         ``convergence_epochs`` / ``convergence_times`` (dict[str, float|None]
-        — epoch / seconds to reach each accuracy milestone, e.g. ``"90%"``).
+        — epoch / seconds to reach each accuracy milestone, e.g. ``"90%"``),
+        ``ece`` (list[float] — Expected Calibration Error per epoch; 0 = perfect
+        calibration, 1 = maximally miscalibrated).
 
     config:
         Benchmark settings. Recognised keys:
@@ -161,8 +163,8 @@ def generate_report(
         swa_header = " SWA Acc (%) |" if combo_has_swa else ""
         swa_sep    = "---|" if combo_has_swa else ""
         lines += [
-            f"| Optimizer | Final Test Acc (%) | Best Test Acc (%) | Epochs to {target_pct}% | Time to {target_pct}% (s) | Epochs Run | Time (s) | Train-Test Gap (%) |{ema_header}{swa_header}",
-            f"|---|---|---|---|---|---|---|---|{ema_sep}{swa_sep}",
+            f"| Optimizer | Final Test Acc (%) | Best Test Acc (%) | Epochs to {target_pct}% | Time to {target_pct}% (s) | Epochs Run | Time (s) | Train-Test Gap (%) | Final ECE |{ema_header}{swa_header}",
+            f"|---|---|---|---|---|---|---|---|---|{ema_sep}{swa_sep}",
         ]
 
         rows = []
@@ -202,10 +204,14 @@ def generate_report(
             swa_acc_raw = hist.get("swa_final_acc")
             swa_acc_pct = swa_acc_raw * 100 if swa_acc_raw is not None else None
 
-            rows.append((series, final_acc, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap, ema_acc_pct, ema_gap_pp, swa_acc_pct))
+            ece_list = hist.get("ece", [])
+            final_ece = ece_list[-1] if ece_list else None
+
+            rows.append((series, final_acc, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap, final_ece, ema_acc_pct, ema_gap_pp, swa_acc_pct))
 
         rows.sort(key=lambda r: r[1], reverse=True)
-        for series, _, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap, ema_acc_pct, ema_gap_pp, swa_acc_pct in rows:
+        for series, _, final_str, best_str, conv_ep_str, conv_time_str, ep_run, total_time, gap, final_ece, ema_acc_pct, ema_gap_pp, swa_acc_pct in rows:
+            ece_str = f"{final_ece:.4f}" if final_ece is not None else "—"
             ema_part = ""
             if combo_has_ema:
                 ema_acc_str = f"{ema_acc_pct:.2f}" if ema_acc_pct is not None else "—"
@@ -216,7 +222,7 @@ def generate_report(
                 swa_str = f"{swa_acc_pct:.2f}" if swa_acc_pct is not None else "—"
                 swa_part = f" {swa_str} |"
             lines.append(
-                f"| {series} | {final_str} | {best_str} | {conv_ep_str} | {conv_time_str} | {ep_run} | {total_time:.1f} | {gap:.2f} |{ema_part}{swa_part}"
+                f"| {series} | {final_str} | {best_str} | {conv_ep_str} | {conv_time_str} | {ep_run} | {total_time:.1f} | {gap:.2f} | {ece_str} |{ema_part}{swa_part}"
             )
         lines.append("")
 
@@ -420,6 +426,9 @@ def generate_report(
             )
             if conv_epoch is not None:
                 line += f", reached {target_pct}% at epoch {conv_epoch:.1f} ({conv_time:.1f} s)"
+            ece_list = hist.get("ece", [])
+            if ece_list:
+                line += f", ECE {ece_list[-1]:.4f}"
             if gap > 5.0:
                 line += f" ⚠️ high train-test gap ({gap:.1f}%)"
             if early_ep is not None:

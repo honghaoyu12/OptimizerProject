@@ -274,11 +274,11 @@ def plot_benchmark(
 
     Layout
     ------
-    One row per (dataset × model) combination, seven columns:
+    One row per (dataset × model) combination, eight columns:
       Train Loss | Test Loss | Train Accuracy | Test Accuracy | LR vs Epoch
-      | Gen Gap (%) | Test Acc vs Steps
+      | Gen Gap (%) | Test Acc vs Steps | ECE
 
-    The last two columns are new:
+    New columns:
 
     * **Gen Gap (%)** — ``(train_acc − test_acc) × 100`` per epoch.  A rising
       gap signals overfitting; a flat or shrinking gap is healthy.  Error bands
@@ -288,6 +288,10 @@ def plot_benchmark(
       steps (``steps_at_epoch_end``) instead of epochs.  This is a fairer
       comparison when optimizers take different-sized steps or when you care
       about compute budget rather than epoch count.
+
+    * **ECE** — Expected Calibration Error per epoch.  Lower is better (0 =
+      perfectly calibrated).  Adaptive methods tend to be better-calibrated
+      than SGD on classification tasks.
 
     Parameters
     ----------
@@ -301,7 +305,7 @@ def plot_benchmark(
     row_labels = [f"{ds} / {mdl}" for ds in dataset_names for mdl in model_names]
     n_rows = len(row_labels)
 
-    fig, axes = plt.subplots(n_rows, 7, figsize=(32, 4.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, 8, figsize=(36, 4.5 * n_rows))
     if n_rows == 1:
         axes = [axes]
 
@@ -435,6 +439,35 @@ def plot_benchmark(
 
         ax_steps.legend(fontsize=7)
         ax_steps.tick_params(labelsize=7)
+
+        # ── Column 7: Expected Calibration Error vs epoch ─────────────────
+        ax_ece = axes[row][7]
+        ax_ece.set_title(f"{row_label}\nECE vs Epoch", fontsize=9)
+        ax_ece.set_xlabel("Epoch", fontsize=8)
+        ax_ece.set_ylabel("ECE (lower is better)", fontsize=8)
+        ax_ece.set_ylim(bottom=0)
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history  = results[key3]
+            ece_vals = history.get("ece", [])
+            if not ece_vals:
+                continue
+            epochs = list(range(1, len(ece_vals) + 1))
+            color  = opt_colors[opt_name]
+            ax_ece.plot(epochs, ece_vals, "o-", color=color, label=opt_name,
+                        linewidth=1.8, markersize=4)
+
+            std_vals = history.get("ece_std", [])
+            if std_vals and len(std_vals) == len(ece_vals):
+                lo = [max(0.0, v - s) for v, s in zip(ece_vals, std_vals)]
+                hi = [v + s for v, s in zip(ece_vals, std_vals)]
+                ax_ece.fill_between(epochs, lo, hi, color=color, alpha=0.15)
+
+        ax_ece.legend(fontsize=7)
+        ax_ece.tick_params(labelsize=7)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
@@ -1111,6 +1144,98 @@ def plot_weight_distance(
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"\n  Weight distance figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Gradient signal-to-noise ratio (per layer, vs epoch)
+# ---------------------------------------------------------------------------
+
+
+def plot_grad_snr(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/grad_snr.png",
+) -> None:
+    """Plot the per-layer gradient signal-to-noise ratio (SNR) vs epoch.
+
+    SNR is defined as ``mean_norm / std_norm`` where the mean and std are
+    taken over the per-batch gradient L2 norms of each Linear layer within
+    a training epoch.
+
+    A high SNR (>> 1) indicates consistent gradient directions across
+    mini-batches — the gradient signal is strong relative to its stochastic
+    noise.  SNR ≈ 1 indicates a highly variable, noisy gradient.
+
+    One subplot per (dataset × model) combination.  Each line shows the
+    **mean SNR across all layers** vs epoch (global view).  Per-layer detail
+    is averaged out because individual layer SNRs are highly correlated and a
+    single trace is easier to compare across optimizers.
+
+    Silently skips runs whose ``history["grad_snr"]`` is empty.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of optimizer/series names (for colour lookup)
+    opt_colors     : {series_name: colour}
+    save_path      : file path to save the figure; ``None`` / ``''`` disables.
+    """
+    combos = [(ds, mdl) for ds in dataset_names for mdl in model_names]
+    n_rows = len(combos)
+    if n_rows == 0:
+        return
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(9, 4.5 * n_rows), squeeze=False)
+    fig.suptitle("Gradient SNR (mean across layers)", fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Epoch", fontsize=9)
+        ax.set_ylabel("mean_norm / std_norm (higher = lower grad noise)", fontsize=9)
+        ax.axhline(1.0, color="gray", linewidth=0.8, linestyle="--", alpha=0.6)
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history = results[key3]
+            snr_dict = history.get("grad_snr", {})
+            if not snr_dict:
+                continue
+
+            # Compute mean SNR across all layers for each epoch
+            n_epochs = max(len(v) for v in snr_dict.values() if v)
+            mean_snr = []
+            for e in range(n_epochs):
+                layer_vals = [
+                    snr_dict[lyr][e]
+                    for lyr in snr_dict
+                    if e < len(snr_dict[lyr]) and not math.isnan(snr_dict[lyr][e])
+                ]
+                mean_snr.append(sum(layer_vals) / len(layer_vals) if layer_vals else float("nan"))
+
+            epochs = list(range(1, n_epochs + 1))
+            color  = opt_colors[opt_name]
+            ax.plot(epochs, mean_snr, "o-", color=color, label=opt_name,
+                    linewidth=1.8, markersize=4)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Gradient SNR figure saved to {save_path}")
 
     plt.show()
 

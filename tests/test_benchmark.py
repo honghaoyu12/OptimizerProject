@@ -291,3 +291,39 @@ def test_weight_distance_aggregated_for_multi_seed():
     assert "weight_distance" in hist
     for layer_vals in hist["weight_distance"].values():
         assert len(layer_vals) == 2
+
+
+def test_grad_snr_present_single_seed():
+    """Single-seed run has 'grad_snr' dict with per-layer lists."""
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "grad_snr" in hist
+    assert isinstance(hist["grad_snr"], dict)
+    for layer_vals in hist["grad_snr"].values():
+        assert len(layer_vals) == 2
+
+
+def test_grad_snr_aggregated_for_multi_seed():
+    """num_seeds=2 → grad_snr is aggregated (averaged) across seeds."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "grad_snr" in hist
+    for layer_vals in hist["grad_snr"].values():
+        assert len(layer_vals) == 2
+
+
+def test_ece_present_single_seed():
+    """Single-seed run has 'ece' list with one entry per epoch."""
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "ece" in hist
+    assert len(hist["ece"]) == 2
+
+
+def test_ece_aggregated_for_multi_seed():
+    """num_seeds=2 → 'ece' is averaged across seeds and has one entry per epoch."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "ece" in hist
+    assert len(hist["ece"]) == 2
+    assert all(0.0 <= v <= 1.0 for v in hist["ece"])

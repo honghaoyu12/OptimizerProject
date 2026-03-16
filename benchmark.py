@@ -54,7 +54,7 @@ from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
 from report import generate_report
 from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity_scores,
                         plot_grad_flow_heatmap, plot_optimizer_states, plot_efficiency_frontier,
-                        plot_weight_distance, plot_hp_heatmap)
+                        plot_weight_distance, plot_hp_heatmap, plot_grad_snr)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +331,8 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         "train_loss", "test_loss", "train_acc", "test_acc", "learning_rates",
         "grad_norm_global", "grad_norm_before_clip", "grad_norm_std", "time_elapsed",
         "test_acc_ema", "steps_at_epoch_end",
+        # ECE is a scalar per epoch — averaged like accuracy
+        "ece",
     ]
     for key in list_keys:
         vals = [h.get(key) or [] for h in histories]
@@ -358,7 +360,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         arr = np.array([v[:min_len] for v in non_empty], dtype=float)
         result["step_losses"] = arr.mean(axis=0).tolist()
 
-    for key in ("weight_norms", "grad_norms", "weight_distance"):
+    for key in ("weight_norms", "grad_norms", "weight_distance", "grad_snr"):
         dicts = [h.get(key, {}) for h in histories]
         all_subkeys: set = set()
         for d in dicts:
@@ -721,6 +723,8 @@ def parse_args():
     p.add_argument("--save-hp-heatmap", default="plots/hp_heatmap.png",
                    help="Path to save LR × WD robustness heatmap ('' to disable; "
                         "only generated when both --lrs and --weight-decays have ≥2 values)")
+    p.add_argument("--save-grad-snr", default="plots/grad_snr.png",
+                   help="Path to save gradient SNR figure ('' to disable)")
     p.add_argument("--auto-lr", action="store_true",
                    help="Run a learning-rate range test (LR finder) before each "
                         "(optimizer, dataset, model) combination and use the found LR "
@@ -871,6 +875,11 @@ def main():
     if args.save_weight_distance:
         plot_weight_distance(results, dataset_names, model_names, series_names,
                              opt_colors, save_path=args.save_weight_distance)
+
+    # ── Gradient SNR ───────────────────────────────────────────────────────
+    if args.save_grad_snr:
+        plot_grad_snr(results, dataset_names, model_names, series_names,
+                      opt_colors, save_path=args.save_grad_snr)
 
     # ── HP Robustness Heatmap ─────────────────────────────────────────────
     if (args.save_hp_heatmap

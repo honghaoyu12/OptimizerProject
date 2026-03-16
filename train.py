@@ -596,7 +596,11 @@ def train_one_epoch(
     """
     model.train()
     total_loss, correct = 0.0, 0
-    grad_accum = {n: 0.0 for n in layer_names}
+    grad_accum    = {n: 0.0 for n in layer_names}
+    # Tracks the sum-of-squares of per-batch gradient norms per layer.
+    # Together with grad_accum (sum of norms), this lets us compute
+    # SNR = mean_norm / std_norm without storing all per-batch tensors.
+    grad_sq_accum = {n: 0.0 for n in layer_names}
     num_batches = 0
     step_losses: list[float] = []
     all_raw_norms: list[float] = []   # pre-clip per-param norms across all batches
@@ -630,12 +634,16 @@ def train_one_epoch(
         else:
             loss.backward()
 
-        # Accumulate gradient norms per linear layer (always full precision here)
+        # Accumulate gradient norms per linear layer (always full precision here).
+        # Both the norm and its square are tracked so we can later compute
+        # SNR = mean_norm / std_norm without keeping all per-batch tensors.
         idx = 0
         for module in model.modules():
             if isinstance(module, nn.Linear):
                 if module.weight.grad is not None:
-                    grad_accum[layer_names[idx]] += module.weight.grad.norm().item()
+                    _gnorm = module.weight.grad.norm().item()
+                    grad_accum[layer_names[idx]]    += _gnorm
+                    grad_sq_accum[layer_names[idx]] += _gnorm * _gnorm
                 idx += 1
 
         # Pre-clip global gradient norm for this batch
@@ -683,6 +691,21 @@ def train_one_epoch(
     grad_norm_before_clip = float(sum(g ** 2 for g in all_raw_norms) ** 0.5) if all_raw_norms else 0.0
     grad_norm_std = float(statistics.stdev(all_grad_norms)) if len(all_grad_norms) > 1 else 0.0
 
+    # Gradient SNR per layer: mean_norm / std_norm.
+    # Computed from the accumulated sum and sum-of-squares of per-batch norms
+    # (Welford-style; avoids storing all per-batch tensors).
+    # SNR > 1 means the gradient magnitude is consistent across mini-batches
+    # (the signal is stronger than the noise).  SNR ≈ 1 indicates a very
+    # stochastic gradient.
+    grad_snr: dict[str, float] = {}
+    for name in layer_names:
+        mean_n  = grad_accum[name] / num_batches if num_batches > 0 else 0.0
+        mean_sq = grad_sq_accum[name] / num_batches if num_batches > 0 else 0.0
+        # Clamp to avoid floating-point negatives near zero
+        var_n   = max(0.0, mean_sq - mean_n * mean_n)
+        std_n   = var_n ** 0.5
+        grad_snr[name] = mean_n / (std_n + 1e-10)
+
     return {
         "loss": total_loss / n,
         "acc": correct / n,
@@ -691,6 +714,8 @@ def train_one_epoch(
         "grad_norm_std": grad_norm_std,
         "grad_norm_before_clip": grad_norm_before_clip,
         "step_losses": step_losses,
+        # Per-layer gradient signal-to-noise ratio (see above).
+        "grad_snr_per_layer": grad_snr,
     }
 
 
@@ -711,6 +736,69 @@ def evaluate(model, loader, criterion, device) -> tuple[float, float]:
         correct += (logits.argmax(dim=1) == labels).sum().item()
     n = len(loader.dataset)
     return total_loss / n, correct / n
+
+
+@torch.no_grad()
+def compute_ece(
+    model: nn.Module,
+    loader: "DataLoader",
+    device: "torch.device",
+    n_bins: int = 10,
+) -> float:
+    """Expected Calibration Error (ECE) on the test set.
+
+    Bins the test samples by their maximum predicted softmax probability
+    (confidence) and measures how well that confidence predicts actual
+    accuracy.  A perfectly calibrated model achieves ECE = 0.
+
+    Formula
+    -------
+    ECE = Σ_b  (|B_b| / N)  ×  |acc(B_b) − conf(B_b)|
+
+    where the sum runs over the *n_bins* equally-spaced bins, N is the
+    total number of samples, and |B_b| is the count in bin b.
+
+    Parameters
+    ----------
+    model  : nn.Module — evaluated in eval() mode
+    loader : DataLoader providing (images, labels) batches
+    device : torch.device
+    n_bins : number of equal-width confidence bins in [0, 1] (default 10)
+
+    Returns
+    -------
+    float
+        ECE in [0, 1].  0 = perfectly calibrated; 1 = maximally miscalibrated.
+    """
+    model.eval()
+    bin_acc_sum  = [0.0] * n_bins
+    bin_conf_sum = [0.0] * n_bins
+    bin_count    = [0]   * n_bins
+
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+        probs = torch.softmax(model(images), dim=1)
+        conf, preds = probs.max(dim=1)
+        correct = (preds == labels).float()
+
+        for i in range(len(labels)):
+            # Map confidence in [0, 1] to a bin index; clamp to [0, n_bins-1]
+            b = min(int(conf[i].item() * n_bins), n_bins - 1)
+            bin_conf_sum[b] += conf[i].item()
+            bin_acc_sum[b]  += correct[i].item()
+            bin_count[b]    += 1
+
+    n_total = sum(bin_count)
+    if n_total == 0:
+        return 0.0
+
+    ece = sum(
+        abs(bin_acc_sum[b] / bin_count[b] - bin_conf_sum[b] / bin_count[b])
+        * bin_count[b] / n_total
+        for b in range(n_bins)
+        if bin_count[b] > 0
+    )
+    return ece
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +909,18 @@ def run_training(
         # in training indicate large, aggressive updates (typical of adaptive
         # methods); a slow, steady rise is characteristic of SGD.
         "weight_distance": {n: [] for n in layer_names},
+        # Gradient signal-to-noise ratio per Linear layer — ratio of the
+        # mean gradient L2 norm to its standard deviation across mini-batches
+        # within the epoch.  High SNR (>> 1) means the gradient direction is
+        # consistent across batches (low noise); SNR ≈ 1 indicates a noisy,
+        # highly stochastic signal.  Adaptive methods tend to show higher SNR
+        # because their adaptive scaling reduces effective gradient variance.
+        "grad_snr": {n: [] for n in layer_names},
+        # Expected Calibration Error on the test set, computed each epoch.
+        # Ranges from 0 (perfect calibration) to 1 (worst possible).  A
+        # well-calibrated model's stated confidence matches its accuracy: if
+        # it predicts 80% confidence on 100 examples, ~80 should be correct.
+        "ece": [],
         "time_elapsed": [],
         "target_accuracy_epoch": None,
         "target_accuracy_time": None,
@@ -962,6 +1062,13 @@ def run_training(
             history["weight_norms"][n].append(w_norms.get(n, float("nan")))
             history["grad_norms"][n].append(epoch_result["grad_norms_per_layer"].get(n, float("nan")))
             history["weight_distance"][n].append(w_dists.get(n, float("nan")))
+            history["grad_snr"][n].append(epoch_result["grad_snr_per_layer"].get(n, float("nan")))
+
+        # Calibration — one-pass ECE evaluation on the test set.
+        # Computed on the *raw* model weights (not EMA / SWA) so the value
+        # tracks how calibration evolves with the primary optimisation trajectory.
+        ece_val = compute_ece(model, test_loader, device)
+        history["ece"].append(ece_val)
 
         # Optimizer internal state snapshot
         _states = _extract_optimizer_states(model, optimizer, layer_names)
