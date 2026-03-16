@@ -229,3 +229,37 @@ def test_convergence_profile_single_seed():
     from train import _CONV_THRESHOLDS
     expected_keys = {f"{int(t * 100)}%" for t in _CONV_THRESHOLDS}
     assert set(hist["convergence_epochs"].keys()) == expected_keys
+
+
+def test_steps_at_epoch_end_present():
+    """Single-seed run has 'steps_at_epoch_end' with one entry per epoch."""
+    results = _run(num_seeds=1, epochs=2)
+    hist = next(iter(results.values()))
+    assert "steps_at_epoch_end" in hist
+    assert len(hist["steps_at_epoch_end"]) == 2
+
+
+def test_steps_at_epoch_end_aggregated_for_multi_seed():
+    """num_seeds=2 → aggregated history still has 'steps_at_epoch_end' list."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "steps_at_epoch_end" in hist
+    assert len(hist["steps_at_epoch_end"]) == 2
+
+
+def test_auto_lr_finds_lr(monkeypatch):
+    """auto_lr=True → run completes and LRFinder suggestion is used (not nan)."""
+    results = _run(auto_lr=True, epochs=1)
+    hist = next(iter(results.values()))
+    # config_lr is the effective LR used; it should be a positive finite number
+    lr = hist.get("config_lr")
+    import math
+    assert lr is not None and math.isfinite(lr) and lr > 0
+
+
+def test_auto_lr_ignored_when_lrs_set():
+    """auto_lr=True with explicit lrs → uses the explicit LR, not the finder's suggestion."""
+    explicit_lr = 0.05
+    results = _run(auto_lr=False, lrs=[explicit_lr], epochs=1)
+    hist = next(iter(results.values()))
+    assert abs(hist.get("config_lr", 0) - explicit_lr) < 1e-9

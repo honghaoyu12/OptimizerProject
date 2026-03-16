@@ -453,3 +453,83 @@ class TestEMAPlot:
         plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam"],
                        {"Adam": "#1f77b4"}, save_path=str(out))
         assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# Gen Gap + Test Acc vs Steps panels (Features 2 & 1)
+# ---------------------------------------------------------------------------
+
+def _make_benchmark_results_with_steps(n_epochs=3):
+    """Minimal results dict with steps_at_epoch_end and std keys."""
+    return {
+        ("MNIST", "MLP", "Adam"): {
+            "train_loss":         [0.5, 0.4, 0.3],
+            "test_loss":          [0.6, 0.5, 0.4],
+            "train_acc":          [0.80, 0.85, 0.90],
+            "test_acc":           [0.75, 0.80, 0.85],
+            "train_acc_std":      [0.01, 0.01, 0.01],
+            "test_acc_std":       [0.01, 0.01, 0.01],
+            "learning_rates":     [1e-3, 1e-3, 1e-3],
+            "steps_at_epoch_end": [468, 936, 1404],
+        }
+    }
+
+
+class TestGenGapAndStepsPanel:
+    """Tests for the Gen Gap (col 5) and Test Acc vs Steps (col 6) panels."""
+
+    def test_runs_without_error(self, tmp_path):
+        """plot_benchmark() with steps_at_epoch_end completes without error."""
+        results = _make_benchmark_results_with_steps()
+        plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam"],
+                       {"Adam": "#1f77b4"}, save_path=str(tmp_path / "bench_steps.png"))
+
+    def test_saves_file(self, tmp_path):
+        """Figure file is created when steps_at_epoch_end is present."""
+        results = _make_benchmark_results_with_steps()
+        out = tmp_path / "bench_steps.png"
+        plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam"],
+                       {"Adam": "#1f77b4"}, save_path=str(out))
+        assert out.exists()
+
+    def test_missing_steps_no_error(self, tmp_path):
+        """plot_benchmark() gracefully handles missing steps_at_epoch_end (backward-compatible)."""
+        results = {
+            ("MNIST", "MLP", "Adam"): {
+                "train_loss": [0.5, 0.4],
+                "test_loss":  [0.6, 0.5],
+                "train_acc":  [0.80, 0.85],
+                "test_acc":   [0.75, 0.80],
+            }
+        }
+        out = tmp_path / "bench_no_steps.png"
+        plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam"],
+                       {"Adam": "#1f77b4"}, save_path=str(out))
+        assert out.exists()
+
+    def test_std_bands_with_steps(self, tmp_path):
+        """Error bands drawn without error when both std keys and steps are present."""
+        results = _make_benchmark_results_with_steps()
+        out = tmp_path / "bench_bands.png"
+        plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam"],
+                       {"Adam": "#1f77b4"}, save_path=str(out))
+        assert out.exists()
+
+    def test_multi_optimizer(self, tmp_path):
+        """Two optimizers with steps data → both plotted without error."""
+        results = {
+            ("MNIST", "MLP", "Adam"): {
+                "train_acc": [0.80, 0.85, 0.90],
+                "test_acc":  [0.75, 0.80, 0.85],
+                "steps_at_epoch_end": [468, 936, 1404],
+            },
+            ("MNIST", "MLP", "SGD"): {
+                "train_acc": [0.70, 0.75, 0.80],
+                "test_acc":  [0.65, 0.70, 0.75],
+                "steps_at_epoch_end": [468, 936, 1404],
+            },
+        }
+        out = tmp_path / "bench_multi.png"
+        plot_benchmark(results, ["MNIST"], ["MLP"], ["Adam", "SGD"],
+                       {"Adam": "#1f77b4", "SGD": "#ff7f0e"}, save_path=str(out))
+        assert out.exists()

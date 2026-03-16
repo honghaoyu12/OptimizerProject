@@ -808,6 +808,11 @@ def run_training(
         # reached, or None if never reached.
         "convergence_epochs": {f"{int(t * 100)}%": None for t in _CONV_THRESHOLDS},
         "convergence_times":  {f"{int(t * 100)}%": None for t in _CONV_THRESHOLDS},
+        # Cumulative gradient steps at the end of each epoch.  Equals
+        # sum(len(batch) for batch in all epochs up to and including this one).
+        # Useful for plotting accuracy vs compute (steps) rather than epochs,
+        # which gives a fairer comparison when batch sizes or epoch counts differ.
+        "steps_at_epoch_end": [],
     }
 
     # ── EMA setup ──────────────────────────────────────────────────────────
@@ -906,6 +911,7 @@ def run_training(
         history["grad_norm_std"].append(epoch_result["grad_norm_std"])
         history["grad_norm_before_clip"].append(epoch_result["grad_norm_before_clip"])
         history["step_losses"].extend(epoch_result["step_losses"])
+        history["steps_at_epoch_end"].append(len(history["step_losses"]))
 
         for n in layer_names:
             history["weight_norms"][n].append(w_norms.get(n, float("nan")))

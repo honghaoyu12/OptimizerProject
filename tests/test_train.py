@@ -1098,3 +1098,54 @@ class TestConvergenceProfile:
                 f"Lower threshold {reached[i][0]} reached later "
                 f"({reached[i][1]}) than {reached[i + 1][0]} ({reached[i + 1][1]})"
             )
+
+
+# ---------------------------------------------------------------------------
+# Per-step efficiency tracking
+# ---------------------------------------------------------------------------
+
+class TestStepsAtEpochEnd:
+    """Tests for history['steps_at_epoch_end'] added by run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_key_present(self):
+        """run_training() always returns 'steps_at_epoch_end' in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "steps_at_epoch_end" in history
+
+    def test_length_equals_epochs(self):
+        """'steps_at_epoch_end' has one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        assert len(history["steps_at_epoch_end"]) == n_epochs
+
+    def test_strictly_increasing(self):
+        """Cumulative step counts must be strictly increasing across epochs."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln, verbose=False)
+        steps = history["steps_at_epoch_end"]
+        for i in range(1, len(steps)):
+            assert steps[i] > steps[i - 1], (
+                f"steps_at_epoch_end not increasing: {steps}"
+            )
+
+    def test_final_value_equals_step_losses_length(self):
+        """Last entry must equal len(history['step_losses']) — cumulative batch count."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert history["steps_at_epoch_end"][-1] == len(history["step_losses"])

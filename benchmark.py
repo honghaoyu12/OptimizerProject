@@ -37,6 +37,7 @@ Output:
 
 import argparse
 import json
+import math
 import os
 from collections import OrderedDict
 
@@ -44,6 +45,7 @@ import torch
 import torch.nn as nn
 
 from logger import TrainingLogger
+from lr_finder import LRFinder
 from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
 from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
@@ -327,7 +329,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
     list_keys = [
         "train_loss", "test_loss", "train_acc", "test_acc", "learning_rates",
         "grad_norm_global", "grad_norm_before_clip", "grad_norm_std", "time_elapsed",
-        "test_acc_ema",
+        "test_acc_ema", "steps_at_epoch_end",
     ]
     for key in list_keys:
         vals = [h.get(key) or [] for h in histories]
@@ -472,6 +474,7 @@ def run_benchmark(
     ema_decay: float | None = None,
     label_smoothing: float = 0.0,
     swa_start: int | None = None,
+    auto_lr: bool = False,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -525,8 +528,33 @@ def run_benchmark(
                             suffixes.append(f"wd={wd:g}")
                         series_name = f"{opt_name} ({', '.join(suffixes)})" if suffixes else opt_name
 
+                        # ── Auto-LR: run LR range test before the seed loop ───────────
+                        # When --auto-lr is active and the user has not specified explicit
+                        # LR values, a fresh temporary model is built, LRFinder sweeps LRs
+                        # on the training data, and the point of steepest loss descent is
+                        # used as the effective LR for all seeds of this run.  The temporary
+                        # model and optimizer are discarded immediately after the search.
+                        effective_lr = lr
+                        if auto_lr and lrs is None:
+                            _tmp_model = mdl_info["factory"](ds_info, hidden_sizes).to(device)
+                            if wd > 0.0:
+                                _tmp_params = make_param_groups(_tmp_model, wd)
+                                _tmp_opt = opt_info["factory"](_tmp_params, opt_info["default_lr"], 0.0)
+                            else:
+                                _tmp_opt = opt_info["factory"](_tmp_model.parameters(), opt_info["default_lr"], 0.0)
+                            _finder = LRFinder(_tmp_model, _tmp_opt, nn.CrossEntropyLoss(), device)
+                            _finder.run(train_loader)
+                            _found_lr = _finder.suggestion()
+                            del _tmp_model, _tmp_opt, _finder
+                            if not math.isnan(_found_lr) and _found_lr > 0:
+                                effective_lr = _found_lr
+                            else:
+                                print(f"  ⚠  Auto-LR: LRFinder returned nan for {opt_name}, "
+                                      f"using default {lr:.2e}")
+
+                        lr_tag = f"{effective_lr:.3g}{'  [auto]' if auto_lr and lrs is None else ''}"
                         print(f"\n{'═' * 60}")
-                        print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {series_name}  (lr={lr})")
+                        print(f"  Run {run_idx}/{total_runs}: {ds_name} | {mdl_name} | {series_name}  (lr={lr_tag})")
                         print(f"{'═' * 60}")
 
                         # Warn once per (opt, lr, wd) if compile is incompatible
@@ -554,9 +582,9 @@ def run_benchmark(
                                               f"Running {opt_name} in eager mode.")
                             if wd > 0.0:
                                 params = make_param_groups(model, wd)
-                                optimizer = opt_info["factory"](params, lr, 0.0)
+                                optimizer = opt_info["factory"](params, effective_lr, 0.0)
                             else:
-                                optimizer = opt_info["factory"](model.parameters(), lr, 0.0)
+                                optimizer = opt_info["factory"](model.parameters(), effective_lr, 0.0)
                             layer_names = linear_layer_names(model)
                             scheduler = SCHEDULER_REGISTRY[scheduler_name](optimizer, epochs, warmup_epochs)
 
@@ -568,7 +596,7 @@ def run_benchmark(
                                 )
                             run_cfg = {
                                 "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
-                                "lr": lr, "epochs": epochs, "weight_decay": wd,
+                                "lr": effective_lr, "epochs": epochs, "weight_decay": wd,
                             }
                             history = run_training(
                                 model, train_loader, test_loader,
@@ -590,7 +618,7 @@ def run_benchmark(
                             if logger is not None:
                                 log_cfg = {
                                     "dataset": ds_key, "model": mdl_name, "optimizer": opt_name,
-                                    "lr": lr, "epochs": epochs, "batch_size": batch_size,
+                                    "lr": effective_lr, "epochs": epochs, "batch_size": batch_size,
                                     "scheduler": scheduler_name, "patience": patience,
                                     "min_delta": min_delta, "max_grad_norm": max_grad_norm,
                                     "weight_decay": wd, "seed": base_seed + seed_idx,
@@ -601,7 +629,7 @@ def run_benchmark(
                             _aggregate_histories(seed_histories) if num_seeds > 1
                             else seed_histories[0]
                         )
-                        aggregated["config_lr"] = lr
+                        aggregated["config_lr"] = effective_lr
                         results[(ds_name, mdl_name, series_name)] = aggregated
 
     return results
@@ -686,6 +714,11 @@ def parse_args():
     p.add_argument("--swa-start", default=None, type=int, metavar="EPOCH",
                    help="Epoch to begin Stochastic Weight Averaging (default: disabled). "
                         "SWA is evaluated once after training completes.")
+    p.add_argument("--auto-lr", action="store_true",
+                   help="Run a learning-rate range test (LR finder) before each "
+                        "(optimizer, dataset, model) combination and use the found LR "
+                        "instead of the optimizer's default.  Ignored when --lrs is "
+                        "also set (explicit LRs take precedence).")
     return p.parse_args()
 
 
@@ -709,6 +742,11 @@ def main():
         print(f"  Label smoothing: {args.label_smoothing}")
     if args.swa_start is not None:
         print(f"  SWA start      : epoch {args.swa_start}")
+    if args.auto_lr:
+        if args.lrs is not None:
+            print(f"  Auto-LR        : --lrs is set; explicit LR values take precedence over auto-LR")
+        else:
+            print(f"  Auto-LR        : enabled (LR range test run before each combination)")
     if args.lrs is not None and len(args.lrs) == 1:
         print(f"  LR (global)  : {args.lrs[0]}")
     elif args.lrs is not None:
@@ -789,6 +827,7 @@ def main():
             ema_decay=args.ema_decay,
             label_smoothing=args.label_smoothing,
             swa_start=args.swa_start,
+            auto_lr=args.auto_lr and args.lrs is None,
         )
         logger.close()
 

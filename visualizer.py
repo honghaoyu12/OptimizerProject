@@ -274,27 +274,40 @@ def plot_benchmark(
 
     Layout
     ------
-    One row per (dataset × model) combination, four columns:
-      Train Loss | Test Loss | Train Accuracy | Test Accuracy
+    One row per (dataset × model) combination, seven columns:
+      Train Loss | Test Loss | Train Accuracy | Test Accuracy | LR vs Epoch
+      | Gen Gap (%) | Test Acc vs Steps
+
+    The last two columns are new:
+
+    * **Gen Gap (%)** — ``(train_acc − test_acc) × 100`` per epoch.  A rising
+      gap signals overfitting; a flat or shrinking gap is healthy.  Error bands
+      show ±1 std of the gap when seed-averaged data is available.
+
+    * **Test Acc vs Steps** — test accuracy plotted against cumulative gradient
+      steps (``steps_at_epoch_end``) instead of epochs.  This is a fairer
+      comparison when optimizers take different-sized steps or when you care
+      about compute budget rather than epoch count.
 
     Parameters
     ----------
     results        : {(dataset_name, model_name, optimizer_name): history_dict}
     dataset_names  : ordered list of dataset names
     model_names    : ordered list of model names
-    optimizer_names: ordered list of optimizer names
+    optimizer_names: ordered list of optimizer names (used for colour lookup)
     opt_colors     : {optimizer_name: hex_color_string}
     save_path      : file to save the figure (None = don't save)
     """
     row_labels = [f"{ds} / {mdl}" for ds in dataset_names for mdl in model_names]
     n_rows = len(row_labels)
 
-    fig, axes = plt.subplots(n_rows, 5, figsize=(22, 4.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, 7, figsize=(32, 4.5 * n_rows))
     if n_rows == 1:
         axes = [axes]
 
     fig.suptitle("Optimizer Benchmark", fontsize=15, fontweight="bold")
 
+    # ── Columns 0-4: standard epoch-based panels ──────────────────────────
     col_titles = ["Train Loss", "Test Loss", "Train Accuracy (%)", "Test Accuracy (%)", "LR vs Epoch"]
     col_keys   = ["train_loss", "test_loss", "train_acc", "test_acc", "learning_rates"]
     is_acc     = [False, False, True, True, False]
@@ -354,6 +367,74 @@ def plot_benchmark(
 
             ax.legend(fontsize=7)
             ax.tick_params(labelsize=7)
+
+        # ── Column 5: Generalisation gap (train_acc − test_acc) × 100 ────
+        ax_gap = axes[row][5]
+        ax_gap.set_title(f"{row_label}\nGen Gap (%)", fontsize=9)
+        ax_gap.set_xlabel("Epoch", fontsize=8)
+        ax_gap.set_ylabel("Train − Test Acc (pp)", fontsize=8)
+        # Dashed zero line so it's easy to spot zero-gap
+        ax_gap.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.6)
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history   = results[key3]
+            train_acc = history.get("train_acc", [])
+            test_acc  = history.get("test_acc", [])
+            if not train_acc or not test_acc:
+                continue
+            n = min(len(train_acc), len(test_acc))
+            gap    = [(tr - te) * 100 for tr, te in zip(train_acc[:n], test_acc[:n])]
+            epochs = list(range(1, n + 1))
+            color  = opt_colors[opt_name]
+            ax_gap.plot(epochs, gap, "o-", color=color, label=opt_name,
+                        linewidth=1.8, markersize=4)
+
+            # Error band: gap std = sqrt(train_std² + test_std²)
+            tr_std = history.get("train_acc_std", [])
+            te_std = history.get("test_acc_std", [])
+            if tr_std and te_std and len(tr_std) >= n and len(te_std) >= n:
+                gap_std = [math.sqrt(ts ** 2 + es ** 2) * 100
+                           for ts, es in zip(tr_std[:n], te_std[:n])]
+                lo = [g - s for g, s in zip(gap, gap_std)]
+                hi = [g + s for g, s in zip(gap, gap_std)]
+                ax_gap.fill_between(epochs, lo, hi, color=color, alpha=0.15)
+
+        ax_gap.legend(fontsize=7)
+        ax_gap.tick_params(labelsize=7)
+
+        # ── Column 6: Test accuracy vs cumulative gradient steps ──────────
+        ax_steps = axes[row][6]
+        ax_steps.set_title(f"{row_label}\nTest Acc vs Steps", fontsize=9)
+        ax_steps.set_xlabel("Gradient steps", fontsize=8)
+        ax_steps.set_ylabel("Test Accuracy (%)", fontsize=8)
+        ax_steps.set_ylim(0, 101)
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history  = results[key3]
+            test_acc = history.get("test_acc", [])
+            steps    = history.get("steps_at_epoch_end", [])
+            if not test_acc or not steps or len(test_acc) != len(steps):
+                continue
+            test_pct = [v * 100 for v in test_acc]
+            color    = opt_colors[opt_name]
+            ax_steps.plot(steps, test_pct, "o-", color=color, label=opt_name,
+                          linewidth=1.8, markersize=4)
+
+            std_vals = history.get("test_acc_std", [])
+            if std_vals and len(std_vals) == len(test_pct):
+                std_pct = [v * 100 for v in std_vals]
+                lo = [v - s for v, s in zip(test_pct, std_pct)]
+                hi = [v + s for v, s in zip(test_pct, std_pct)]
+                ax_steps.fill_between(steps, lo, hi, color=color, alpha=0.15)
+
+        ax_steps.legend(fontsize=7)
+        ax_steps.tick_params(labelsize=7)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
