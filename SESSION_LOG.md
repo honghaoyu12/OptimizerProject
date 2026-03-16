@@ -608,6 +608,38 @@ Total tests: **356** (up from 347).
 
 ---
 
+## Session 36 — Documentation Pass & Bug Fixes
+
+**What we discussed:**
+- Confirmed multi-seed averaging (`--num-seeds`) was already fully implemented from a prior session — no new code needed
+- Identified accumulated annotation debt: stale module docstrings, undocumented functions, a misleading variable name, and an unused import
+- Fixed all annotation issues without touching any test logic
+
+**What was fixed (bugs):**
+- `model.py`: removed unused `import math` (dead import — `math` was never referenced in that file)
+- `train.py`: renamed `criterion_no_reduce` → `criterion_hessian` — the old name falsely implied `reduction="none"`; it actually uses default `reduction="mean"` and is only used for Hessian/sharpness diagnostics
+
+**What was annotated:**
+- `train.py` module docstring: rewrote to list all 20 optimizers, 8 datasets, 3 models, and a Quickstart section
+- `train.py` `evaluate()`: added missing docstring
+- `train.py` `build_optimizer()`: added full docstring explaining per-group weight decay pattern
+- `train.py` `build_model()`: corrected docstring (`"mlp" or "resnet18"` → `"mlp" | "resnet18" | "vit"`)
+- `train.py` `train_one_epoch()`: added all parameter docs including `ema_state`/`ema_decay`
+- `train.py` `run_training()`: expanded Returns to document `test_acc_ema`, `swa_final_acc`, `early_stopped_epoch`, `optimizer_states`
+- `train.py` EMA evaluation block: expanded comment to explain the `state_dict()` detached-views bug and why `.clone()` is mandatory
+- `train.py` SWA init block: added comment explaining `update_bn()` purpose and when it is skipped (MLP)
+- `benchmark.py` module docstring: restructured into "Key CLI flags" reference sections
+- `benchmark.py` `_aggregate_histories()`: full docstring explaining how each key type is aggregated
+- `report.py` `generate_report()`: config keys and optional history keys fully listed
+- `logger.py` `log_run()`: history optional keys updated to include `learning_rates`, `test_acc_ema`, `swa_final_acc`
+
+**Other:**
+- Resolved recurring `Auto-update failed` error for the Claude Code CLI via `npm i -g @anthropic-ai/claude-code` (3 packages updated)
+
+Total tests: **379** (unchanged — no functional code changes in this session)
+
+---
+
 ## Session 35 — Stochastic Weight Averaging (`--swa-start`)
 
 **What we discussed:**

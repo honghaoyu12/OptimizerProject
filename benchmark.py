@@ -4,12 +4,35 @@ Run with:
     python benchmark.py
 
 You are first prompted to select one or more datasets, then one or more
-models, then one or more optimizers.  Every (dataset, model, optimizer)
-triple is trained in sequence and the results are plotted together for
-easy comparison.
+models, then one or more optimizers.  Every (dataset × model × optimizer)
+combination is trained in sequence; results are plotted together for
+easy comparison and saved to a Markdown report.
 
-Optional CLI flags let you set shared hyperparameters without re-running:
-    --epochs, --batch-size, --hidden-sizes, --lrs, --device, --save-plot
+Key CLI flags
+-------------
+Training:
+    --epochs, --batch-size, --hidden-sizes, --device
+    --scheduler  (none | cosine | step | warmup_cosine | cosine_wr)
+    --warmup-epochs, --patience, --min-delta, --max-grad-norm
+    --ema-decay, --label-smoothing, --swa-start
+
+LR / WD sweep:
+    --lrs         (omit = per-optimizer defaults; one value = global override;
+                  multiple values = LR sweep with lr= suffix in series names)
+    --weight-decays  (similar multi-value sweep)
+
+Seed averaging:
+    --num-seeds   (default 1; >1 trains each combo N times and reports mean ± std)
+    --seed        (base seed; consecutive seeds base+0, base+1, … are used)
+
+Persistence:
+    --save-results PATH   write results dict to JSON after training
+    --load-results PATH   skip training; load a previous JSON and go straight
+                          to plotting and report generation
+
+Output:
+    --save-plot, --save-lr-plot, --save-lr-scores, --save-grad-heatmap,
+    --save-opt-states, --save-frontier, --report-path
 """
 
 import argparse
@@ -269,8 +292,29 @@ def _load_results(path: str) -> dict:
 def _aggregate_histories(histories: list[dict]) -> dict:
     """Aggregate N per-seed histories into mean ± std.
 
-    List-valued keys are stacked and reduced along the seed axis.
-    Scalar and special keys are handled individually.
+    Each entry in ``histories`` is the raw dict returned by run_training()
+    for one random seed.  The aggregated result has the same keys as a
+    single-seed history, plus ``<key>_std`` companions for every list-
+    valued metric (e.g. ``test_acc_std``).
+
+    How each key type is handled
+    ----------------------------
+    * **List-valued metrics** (train_loss, test_acc, …) — stacked into a
+      2-D array of shape (num_seeds × epochs), then reduced along axis=0
+      to produce mean and std lists.  Truncated to the shortest seed when
+      early stopping caused unequal lengths.
+    * **Scalar convergence keys** (target_accuracy_epoch, target_accuracy_time)
+      — averaged across seeds that actually reached the target; None if none did.
+    * **early_stopped_epoch** — mean epoch across seeds that were stopped,
+      rounded to int; None if early stopping was never triggered.
+    * **step_losses** — batch-level losses concatenated then averaged
+      (useful for step-level loss curves after seed averaging).
+    * **weight_norms / grad_norms** — per-layer dicts, each layer averaged
+      across seeds.
+    * **optimizer_states** — per-state-key, per-layer trajectories averaged
+      across seeds; scalar trajectories (e.g. Prodigy's d) also averaged.
+    * **All other keys** (config, flags, non-list scalars) — taken from
+      histories[0] unchanged.
     """
     import numpy as np
 
@@ -279,6 +323,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
 
     result: dict = {}
 
+    # ── List-valued per-epoch metrics ─────────────────────────────────────
     list_keys = [
         "train_loss", "test_loss", "train_acc", "test_acc", "learning_rates",
         "grad_norm_global", "grad_norm_before_clip", "grad_norm_std", "time_elapsed",
@@ -289,6 +334,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         non_empty = [v for v in vals if v]
         if not non_empty:
             continue
+        # Truncate to shortest run (early stopping may cause different lengths)
         min_len = min(len(v) for v in non_empty)
         arr = np.array([v[:min_len] for v in non_empty], dtype=float)
         result[key] = arr.mean(axis=0).tolist()

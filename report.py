@@ -33,10 +33,14 @@ def generate_report(
             test_acc      : list[float]
             time_elapsed  : list[float]  (cumulative seconds)
 
-        Optional keys: ``early_stopped_epoch`` (int | None).
+        Optional keys: ``early_stopped_epoch`` (int | None),
+        ``test_acc_ema`` (list[float]), ``swa_final_acc`` (float | None),
+        ``test_acc_std`` (list[float] — present after multi-seed aggregation).
     config:
-        Benchmark settings. Recognised keys: ``epochs``, ``batch_size``,
-        ``scheduler``, ``weight_decays``, ``lrs``, ``seed``.
+        Benchmark settings. Recognised keys:
+        ``epochs``, ``batch_size``, ``scheduler``, ``weight_decays``,
+        ``lrs``, ``seed``, ``num_seeds``, ``target_acc``,
+        ``label_smoothing``, ``swa_start``.
     save_path:
         File path to write the report.  Pass ``''`` to skip writing.
 

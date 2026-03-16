@@ -1,10 +1,23 @@
-"""Training script for MNIST / FashionMNIST / CIFAR-10 / Tiny ImageNet classification.
+"""Single-run trainer for image and tabular classification.
 
-Swap the optimizer by changing the `build_optimizer` function or by passing
-`--optimizer` on the command line.
+Supports datasets  : mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet
+                     + 5 synthetic tabular datasets (illcond, sparse, noisy_grad,
+                     manifold, saddle)
+Supports models    : mlp | resnet18 | vit
+Supports optimizers: 20 choices — see OPTIMIZER_REGISTRY below for the full list.
 
-Built-in choices  : adam | sgd | rmsprop | vanilla_sgd
-Custom optimizer  : add your class to optimizers/ and register it below.
+Quickstart
+----------
+    python train.py                                  # Adam on MNIST (defaults)
+    python train.py --optimizer sgd --lr 0.01        # SGD on MNIST
+    python train.py --dataset cifar10 --model resnet18 --scheduler cosine
+    python train.py --ema-decay 0.999 --swa-start 5 --num-epochs 10
+
+To add a custom optimizer
+-------------------------
+    1. Implement it in optimizers/<your_file>.py (subclass BaseOptimizer).
+    2. Import it in this file.
+    3. Add a lambda entry to OPTIMIZER_REGISTRY below.
 """
 
 import argparse
@@ -248,6 +261,21 @@ def make_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
 
 
 def build_optimizer(name: str, model: nn.Module, lr: float, weight_decay: float = 0.0):
+    """Instantiate an optimizer by name.
+
+    When weight_decay > 0, parameters are split into two groups via
+    make_param_groups() so that 1-D params (biases, norms) are exempt.
+    The weight_decay argument is passed to the decay group only; the
+    factory always receives wd=0.0 because the per-group dicts already
+    carry the correct values.
+
+    Parameters
+    ----------
+    name         : key from OPTIMIZER_REGISTRY (case-insensitive)
+    model        : the nn.Module to optimise
+    lr           : learning rate
+    weight_decay : L2 penalty on weight matrices / conv filters (default 0)
+    """
     name = name.lower()
     if name not in OPTIMIZER_REGISTRY:
         raise ValueError(
@@ -425,9 +453,10 @@ def build_model(model_name: str, dataset_info: dict, hidden_sizes: list[int]) ->
 
     Parameters
     ----------
-    model_name   : "mlp" or "resnet18"
-    dataset_info : dict with keys in_channels, input_size, num_classes
-    hidden_sizes : hidden layer widths (only used by MLP)
+    model_name   : "mlp" | "resnet18" | "vit"
+    dataset_info : dict with keys in_channels, input_size, num_classes.
+                   Tabular datasets must use "mlp"; others raise ValueError.
+    hidden_sizes : hidden layer widths (only used by MLP, ignored for others)
     """
     name = model_name.lower()
     if dataset_info.get("tabular") and name != "mlp":
@@ -496,18 +525,40 @@ def train_one_epoch(
     ema_state: dict | None = None,
     ema_decay: float = 0.999,
 ) -> dict:
-    """Run one training epoch.
+    """Run one training epoch and return per-epoch metrics.
+
+    Parameters
+    ----------
+    model            : nn.Module to train (set to train() internally)
+    loader           : DataLoader providing (images, labels) batches
+    optimizer        : the torch.optim.Optimizer to step
+    criterion        : loss function (e.g. CrossEntropyLoss with label smoothing)
+    device           : torch.device
+    layer_names      : list of display names from linear_layer_names(); used for
+                       per-layer gradient accumulation
+    global_step_offset: step index at the start of this epoch (for multi-epoch
+                       step counting; not used by this function but kept for
+                       external callers that need absolute step numbers)
+    max_grad_norm    : if set, clip global gradient L2 norm to this value before
+                       the optimizer step; None = no clipping
+    amp              : enable float16 autocast (GPU/MPS only)
+    scaler           : GradScaler for CUDA AMP (None if not using AMP)
+    ema_state        : if not None, a dict {param_name: tensor} that is updated
+                       in-place after each optimizer step using exponential moving
+                       average: ema = ema * decay + param * (1 - decay)
+    ema_decay        : EMA coefficient (only used when ema_state is not None)
 
     Returns
     -------
     dict with keys:
-        loss                : float  — average per-sample cross-entropy
-        acc                 : float  — fraction of correct predictions
-        grad_norms_per_layer: dict[str, float]  — mean grad L2 norm per linear layer
-        grad_norm_global    : float  — L2 norm across all parameter gradients (post-clip)
-        grad_norm_std       : float  — std of per-parameter gradient norms
-        grad_norm_before_clip: float — L2 norm across all parameter gradients (pre-clip)
-        step_losses         : list[float]  — per-batch loss values
+        loss                 : float  — average per-sample cross-entropy
+        acc                  : float  — fraction of correct predictions in [0, 1]
+        grad_norms_per_layer : dict[str, float]  — mean grad L2 norm per linear layer
+        grad_norm_global     : float  — global L2 norm across all params (post-clip)
+        grad_norm_std        : float  — std of per-parameter gradient norms
+        grad_norm_before_clip: float  — global L2 norm (pre-clip; equals
+                               grad_norm_global when max_grad_norm is None)
+        step_losses          : list[float]  — per-batch loss values
     """
     model.train()
     total_loss, correct = 0.0, 0
@@ -610,7 +661,12 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device) -> tuple[float, float]:
+    """Evaluate *model* on *loader* and return (mean_loss, accuracy).
+
+    Runs in torch.no_grad() context; sets model to eval() mode.
+    Accuracy is returned as a fraction in [0, 1], not a percentage.
+    """
     model.eval()
     total_loss, correct = 0.0, 0
     for images, labels in loader:
@@ -643,25 +699,57 @@ def run_training(
     ema_decay: float | None = None,
     swa_start: int | None = None,
 ) -> dict:
-    """Train for *epochs* and return a history dict with per-epoch metrics.
+    """Train *model* for *epochs* and return a history dict.
+
+    Parameters
+    ----------
+    model            : nn.Module to train
+    train_loader     : DataLoader for training data
+    test_loader      : DataLoader for evaluation
+    optimizer        : configured torch.optim.Optimizer
+    criterion        : loss function (CrossEntropyLoss, optionally with label smoothing)
+    device           : torch.device
+    epochs           : total number of training epochs
+    layer_names      : display names from linear_layer_names()
+    verbose          : print epoch summaries to stdout
+    compute_hessian  : compute Hessian trace + sharpness each epoch (slow)
+    target_acc       : accuracy threshold to record convergence speed (fraction, e.g. 0.95)
+    scheduler        : LR scheduler; step() is called once per epoch after training
+    patience         : early stopping patience in epochs (0 = disabled)
+    min_delta        : minimum val-loss improvement to reset patience counter
+    max_grad_norm    : global gradient clip norm (None = disabled)
+    checkpoint_dir   : if set, saves best.pt and final.pt to this directory
+    checkpoint_config: extra metadata dict written into checkpoint files
+    amp              : enable automatic mixed precision
+    resume_from      : path to a .pt checkpoint to resume from
+    ema_decay        : if not None, maintain an EMA shadow copy of model weights
+                       (float, e.g. 0.999) and evaluate it alongside raw weights
+    swa_start        : if not None, start Stochastic Weight Averaging at this epoch
 
     Returns
     -------
     dict with keys:
         train_loss, test_loss      : list[float]
-        train_acc,  test_acc       : list[float]  (fractions, not percentages)
-        weight_norms               : dict[layer_name, list[float]]
-        grad_norms                 : dict[layer_name, list[float]]
-        time_elapsed               : list[float]  — seconds since start per epoch
-        target_accuracy_epoch      : int | None
-        target_accuracy_time       : float | None
-        grad_norm_global           : list[float]
-        grad_norm_std              : list[float]
-        grad_norm_before_clip      : list[float]  — pre-clip global norm per epoch
-        hessian_trace              : list[float]  — NaN if compute_hessian=False
-        sharpness                  : list[float]  — NaN if compute_hessian=False
-        step_losses                : list[float]  — all batch-level losses across epochs
-        learning_rates             : list[float]  — LR at start of each epoch
+        train_acc,  test_acc       : list[float]  — fractions in [0, 1], not percentages
+        weight_norms               : dict[layer_name, list[float]]  — per-layer L2 norms
+        grad_norms                 : dict[layer_name, list[float]]  — per-layer mean grad norms
+        time_elapsed               : list[float]  — cumulative wall-clock seconds per epoch
+        target_accuracy_epoch      : int | None   — first epoch where test_acc >= target_acc
+        target_accuracy_time       : float | None — wall-clock seconds at that epoch
+        grad_norm_global           : list[float]  — post-clip global gradient norm per epoch
+        grad_norm_std              : list[float]  — std of per-param gradient norms
+        grad_norm_before_clip      : list[float]  — pre-clip global norm (same as above when
+                                     max_grad_norm is None)
+        hessian_trace              : list[float]  — NaN per epoch if compute_hessian=False
+        sharpness                  : list[float]  — NaN per epoch if compute_hessian=False
+        step_losses                : list[float]  — every batch loss across all epochs
+        learning_rates             : list[float]  — LR recorded at the start of each epoch
+        early_stopped_epoch        : int | None   — epoch where early stopping fired
+        optimizer_states           : dict         — per-layer optimizer state trajectories
+        test_acc_ema               : list[float]  — EMA model test accuracy each epoch
+                                     (empty list when ema_decay is None)
+        swa_final_acc              : float | None — SWA model accuracy after training
+                                     (None when swa_start is None)
     """
     from metrics import compute_hessian_trace, compute_sharpness
 
@@ -710,13 +798,22 @@ def run_training(
         "swa_final_acc": None,
     }
 
-    # Initialise EMA state (float tensors only; updated in-place each batch)
+    # ── EMA setup ──────────────────────────────────────────────────────────
+    # EMA keeps a shadow copy of every float parameter, updated in-place after
+    # each optimizer step: ema = ema * decay + param * (1 - decay).
+    # Only floating-point tensors are tracked (int buffers like running_mean
+    # counters are excluded — they are updated by the model directly).
     ema_state: dict | None = None
     if ema_decay is not None:
         ema_state = {k: v.clone() for k, v in model.state_dict().items()
                      if v.is_floating_point()}
 
-    # Initialise SWA averaged model (starts accumulating at epoch swa_start)
+    # ── SWA setup ──────────────────────────────────────────────────────────
+    # AveragedModel maintains a running uniform average of model weights.
+    # update_parameters() is called after each training epoch >= swa_start.
+    # After the loop, update_bn() re-estimates BatchNorm statistics (needed
+    # because SWA weights have different statistics than any single checkpoint).
+    # For MLP (no BatchNorm), update_bn() is skipped entirely.
     swa_model = None
     if swa_start is not None:
         swa_model = torch.optim.swa_utils.AveragedModel(model)
@@ -745,7 +842,10 @@ def run_training(
             hessian_batch = batch
             break
 
-    criterion_no_reduce = nn.CrossEntropyLoss()
+    # Plain CE loss (no label smoothing) used exclusively for Hessian / sharpness
+    # estimation — the diagnostics should measure the true loss curvature, not
+    # the smoothed training objective.
+    criterion_hessian = nn.CrossEntropyLoss()
     start_time = time.time()
     global_step_offset = 0
 
@@ -771,9 +871,10 @@ def run_training(
         train_acc  = epoch_result["acc"]
         test_loss, test_acc = evaluate(model, test_loader, criterion, device)
 
-        # EMA evaluation: temporarily swap EMA weights in, evaluate, restore.
-        # state_dict() returns detached views sharing parameter storage, so we
-        # must clone explicitly to preserve the originals before loading EMA weights.
+        # EMA evaluation: temporarily load EMA weights, evaluate, then restore.
+        # IMPORTANT — state_dict() returns detached views sharing parameter storage,
+        # so .clone() is required; without it 'orig_state' would be silently
+        # overwritten when load_state_dict() writes new values into that storage.
         if ema_state is not None:
             orig_state = {k: v.clone() for k, v in model.state_dict().items()}
             model.load_state_dict({**orig_state, **ema_state})
@@ -825,8 +926,8 @@ def run_training(
 
         # Hessian / sharpness
         if compute_hessian and hessian_batch is not None:
-            ht = compute_hessian_trace(model, hessian_batch, criterion_no_reduce, device)
-            sh = compute_sharpness(model, hessian_batch, criterion_no_reduce, device)
+            ht = compute_hessian_trace(model, hessian_batch, criterion_hessian, device)
+            sh = compute_sharpness(model, hessian_batch, criterion_hessian, device)
         else:
             ht = float("nan")
             sh = float("nan")
@@ -1138,9 +1239,10 @@ def main():
         train_acc  = epoch_result["acc"]
         test_loss, test_acc = evaluate(model, test_loader, criterion, device)
 
-        # EMA evaluation: temporarily swap EMA weights in, evaluate, restore.
-        # state_dict() returns detached views sharing parameter storage, so we
-        # must clone explicitly to preserve the originals before loading EMA weights.
+        # EMA evaluation: temporarily load EMA weights, evaluate, then restore.
+        # IMPORTANT — state_dict() returns detached views sharing parameter storage,
+        # so .clone() is required; without it 'orig_state' would be silently
+        # overwritten when load_state_dict() writes new values into that storage.
         if ema_state is not None:
             orig_state = {k: v.clone() for k, v in model.state_dict().items()}
             model.load_state_dict({**orig_state, **ema_state})

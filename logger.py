@@ -54,9 +54,13 @@ class TrainingLogger:
                   Any additional keys (lr, epochs, batch_size, …) are
                   written to the log header.
         history : dict as returned by run_training() or collected by
-                  main().  Expected keys:
+                  main().  Required keys:
                     train_loss, train_acc, test_loss, test_acc,
                     time_elapsed, step_losses.
+                  Optional keys (written when present):
+                    learning_rates   — per-epoch LR recorded to epoch CSV
+                    test_acc_ema     — EMA model accuracy per epoch
+                    swa_final_acc    — scalar SWA accuracy (written to summary).
 
         Returns
         -------

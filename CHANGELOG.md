@@ -4,6 +4,43 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
+## Round 35 — Documentation Pass & Bug Fixes
+
+### `model.py`
+
+- Removed unused `import math` (dead import — `math` is not referenced anywhere in the file).
+
+### `train.py`
+
+- Module docstring rewritten: lists all supported datasets, models, and optimizers instead of the outdated 4-entry example.
+- `build_optimizer()` — added full docstring explaining per-group weight decay logic.
+- `build_model()` docstring: corrected `"mlp" or "resnet18"` → `"mlp" | "resnet18" | "vit"`.
+- `evaluate()` — added docstring (was undocumented).
+- `train_one_epoch()` — expanded docstring to document all parameters including `ema_state` / `ema_decay`.
+- `run_training()` — expanded Returns section to include `test_acc_ema`, `swa_final_acc`, `early_stopped_epoch`, `optimizer_states`.
+- `criterion_no_reduce` renamed to `criterion_hessian` (the old name implied `reduction="none"` but the plain CE loss uses default `reduction="mean"`; the new name accurately describes its purpose — used only for Hessian/sharpness diagnostics).
+- EMA evaluation comment block expanded to explain the `state_dict()` detached-views pitfall.
+- SWA initialisation comment block expanded to explain why `update_bn()` is needed and when it is skipped.
+
+### `benchmark.py`
+
+- Module docstring rewritten: structured into "Key CLI flags" sections covering training, sweeps, seed averaging, persistence, and output paths.
+- `_aggregate_histories()` docstring expanded: documents each key type (list metrics, convergence scalars, early stopping, step losses, weight/grad norms, optimizer states, passthrough keys).
+- Inline comment added inside `_aggregate_histories()` to explain truncation to shortest seed run.
+
+### `report.py`
+
+- `generate_report()` docstring: `config` recognised keys updated to include `num_seeds`, `target_acc`, `label_smoothing`, `swa_start`.
+- `results` dict optional history keys updated to include `test_acc_ema`, `swa_final_acc`, `test_acc_std`.
+
+### `logger.py`
+
+- `log_run()` docstring: history optional keys updated to include `learning_rates`, `test_acc_ema`, `swa_final_acc`.
+
+Total tests: **379** (unchanged — no functional changes in this round).
+
+---
+
 ## Round 34 — Stochastic Weight Averaging (`--swa-start`)
 
 ### `train.py`
