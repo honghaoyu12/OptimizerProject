@@ -8,7 +8,7 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
                         plot_grad_flow_heatmap, plot_optimizer_states,
                         plot_efficiency_frontier, _pareto_frontier,
                         _compute_lr_sensitivity, plot_weight_distance, plot_hp_heatmap,
-                        plot_grad_snr)
+                        plot_grad_snr, plot_class_accuracy, plot_instability, plot_step_size)
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +754,199 @@ class TestGradSNRPlot:
         results = {("MNIST", "MLP", "Adam"): {"grad_snr": {}}}
         out = tmp_path / "grad_snr_empty.png"
         plot_grad_snr(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# plot_class_accuracy
+# ---------------------------------------------------------------------------
+
+def _make_class_acc_results(n_classes=2, opt_name="Adam"):
+    """Minimal results dict with per-class accuracy data."""
+    return {
+        ("MNIST", "MLP", opt_name): {
+            "class_acc": {c: [0.90 + c * 0.01, 0.92 + c * 0.01] for c in range(n_classes)}
+        }
+    }
+
+
+class TestClassAccuracyPlot:
+    """Tests for plot_class_accuracy()."""
+
+    def test_runs_without_error(self, tmp_path):
+        results = _make_class_acc_results(n_classes=10)
+        plot_class_accuracy(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(tmp_path / "class_acc.png"),
+        )
+
+    def test_saves_file(self, tmp_path):
+        results = _make_class_acc_results(n_classes=10)
+        out = tmp_path / "class_acc.png"
+        plot_class_accuracy(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_many_classes_line_plot(self, tmp_path):
+        """More than 20 classes → falls back to line plot without error."""
+        results = _make_class_acc_results(n_classes=100)
+        out = tmp_path / "class_acc_100.png"
+        plot_class_accuracy(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_multi_optimizer(self, tmp_path):
+        results = _make_class_acc_results(n_classes=10, opt_name="Adam")
+        results.update(_make_class_acc_results(n_classes=10, opt_name="SGD"))
+        out = tmp_path / "class_acc_multi.png"
+        plot_class_accuracy(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam", "SGD"],
+            opt_colors={"Adam": "#1f77b4", "SGD": "#ff7f0e"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_empty_class_acc_no_error(self, tmp_path):
+        """Results missing class_acc → no error, file still created."""
+        results = {("MNIST", "MLP", "Adam"): {"test_acc": [0.9]}}
+        out = tmp_path / "class_acc_empty.png"
+        plot_class_accuracy(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# plot_instability
+# ---------------------------------------------------------------------------
+
+class TestInstabilityPlot:
+    """Tests for plot_instability()."""
+
+    def _make_results(self, opt_name="Adam"):
+        return {
+            ("MNIST", "MLP", opt_name): {
+                "batch_loss_std": [0.15, 0.12, 0.09],
+            }
+        }
+
+    def test_runs_without_error(self, tmp_path):
+        plot_instability(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(tmp_path / "instability.png"),
+        )
+
+    def test_saves_file(self, tmp_path):
+        out = tmp_path / "instability.png"
+        plot_instability(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_multi_optimizer(self, tmp_path):
+        results = self._make_results("Adam")
+        results.update(self._make_results("SGD"))
+        out = tmp_path / "instability_multi.png"
+        plot_instability(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam", "SGD"],
+            opt_colors={"Adam": "#1f77b4", "SGD": "#ff7f0e"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_missing_key_no_error(self, tmp_path):
+        """Results without batch_loss_std → skipped gracefully."""
+        results = {("MNIST", "MLP", "Adam"): {"test_acc": [0.9]}}
+        out = tmp_path / "instability_empty.png"
+        plot_instability(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# plot_step_size
+# ---------------------------------------------------------------------------
+
+class TestStepSizePlot:
+    """Tests for plot_step_size()."""
+
+    def _make_results(self, opt_name="Adam"):
+        return {
+            ("MNIST", "MLP", opt_name): {
+                "step_size": {
+                    "Linear-0": [0.05, 0.04, 0.03],
+                    "Linear-1": [0.03, 0.025, 0.02],
+                }
+            }
+        }
+
+    def test_runs_without_error(self, tmp_path):
+        plot_step_size(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(tmp_path / "step_size.png"),
+        )
+
+    def test_saves_file(self, tmp_path):
+        out = tmp_path / "step_size.png"
+        plot_step_size(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_multi_optimizer(self, tmp_path):
+        results = self._make_results("Adam")
+        results.update(self._make_results("SGD"))
+        out = tmp_path / "step_size_multi.png"
+        plot_step_size(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam", "SGD"],
+            opt_colors={"Adam": "#1f77b4", "SGD": "#ff7f0e"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_empty_step_size_no_error(self, tmp_path):
+        """Results with empty step_size dict → no error."""
+        results = {("MNIST", "MLP", "Adam"): {"step_size": {}}}
+        out = tmp_path / "step_size_empty.png"
+        plot_step_size(
             results,
             dataset_names=["MNIST"], model_names=["MLP"],
             optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},

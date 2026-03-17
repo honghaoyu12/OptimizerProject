@@ -13,9 +13,11 @@ from train import (
     _extract_optimizer_states,
     build_model,
     build_optimizer,
+    compute_ece,
     evaluate,
     linear_layer_names,
     make_param_groups,
+    per_class_accuracy,
     run_training,
     set_seed,
     train_one_epoch,
@@ -1318,3 +1320,173 @@ class TestCalibration:
         ece = compute_ece(model, test_loader, device)
         assert isinstance(ece, float)
         assert 0.0 <= ece <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Per-class accuracy
+# ---------------------------------------------------------------------------
+
+class TestPerClassAccuracy:
+    """Tests for history['class_acc'] and per_class_accuracy() helper."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_class_acc_key_present(self):
+        """run_training() returns 'class_acc' dict in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "class_acc" in history
+        assert isinstance(history["class_acc"], dict)
+
+    def test_class_acc_keys_are_ints(self):
+        """class_acc dict keys are integers (class IDs)."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 1, ln, verbose=False)
+        for k in history["class_acc"]:
+            assert isinstance(k, int), f"Expected int key, got {type(k)}: {k}"
+
+    def test_class_acc_values_in_unit_interval(self):
+        """All per-class accuracy values are in [0, 1]."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for cls_id, vals in history["class_acc"].items():
+            for v in vals:
+                assert 0.0 <= v <= 1.0, f"Class {cls_id}: {v} not in [0, 1]"
+
+    def test_class_acc_length_equals_epochs(self):
+        """Each class list has one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        for cls_id, vals in history["class_acc"].items():
+            assert len(vals) == n_epochs, (
+                f"Class {cls_id}: expected {n_epochs} entries, got {len(vals)}"
+            )
+
+    def test_per_class_accuracy_helper(self):
+        """per_class_accuracy() returns a dict of int→float in [0, 1]."""
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        _, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        device = torch.device("cpu")
+        result = per_class_accuracy(model, test_loader, device)
+        assert isinstance(result, dict)
+        for cls_id, acc in result.items():
+            assert isinstance(cls_id, int)
+            assert 0.0 <= acc <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Training instability (batch_loss_std)
+# ---------------------------------------------------------------------------
+
+class TestInstabilityScore:
+    """Tests for history['batch_loss_std'] in run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_key_present(self):
+        """run_training() returns 'batch_loss_std' list in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "batch_loss_std" in history
+        assert isinstance(history["batch_loss_std"], list)
+
+    def test_one_per_epoch(self):
+        """'batch_loss_std' has exactly one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        assert len(history["batch_loss_std"]) == n_epochs
+
+    def test_values_non_negative(self):
+        """All batch_loss_std values are >= 0."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for v in history["batch_loss_std"]:
+            assert v >= 0.0, f"Negative batch_loss_std: {v}"
+
+
+# ---------------------------------------------------------------------------
+# Effective step size
+# ---------------------------------------------------------------------------
+
+class TestEffectiveStepSize:
+    """Tests for history['step_size'] in run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_key_present(self):
+        """run_training() returns 'step_size' dict in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "step_size" in history
+        assert isinstance(history["step_size"], dict)
+
+    def test_same_layer_keys_as_weight_norms(self):
+        """step_size has the same layer keys as weight_norms."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert set(history["step_size"].keys()) == set(history["weight_norms"].keys())
+
+    def test_length_equals_epochs_per_layer(self):
+        """Each layer list has one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        for layer, vals in history["step_size"].items():
+            assert len(vals) == n_epochs, (
+                f"Layer {layer}: expected {n_epochs} entries, got {len(vals)}"
+            )
+
+    def test_values_non_negative(self):
+        """All step sizes are non-negative (L2 norm)."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.SGD(model.parameters(), lr=0.01)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for layer, vals in history["step_size"].items():
+            for v in vals:
+                assert v >= 0.0, f"Negative step size for {layer}: {v}"
+
+    def test_positive_with_nonzero_lr(self):
+        """With a nonzero LR, step sizes should be > 0 (weights actually move)."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for layer, vals in history["step_size"].items():
+            assert vals[0] > 0.0, f"Zero step size at epoch 1 for {layer}"

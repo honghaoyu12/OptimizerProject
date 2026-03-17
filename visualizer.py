@@ -1351,3 +1351,294 @@ def plot_hp_heatmap(
         print(f"\n  HP heatmap saved to {save_path}")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Per-class accuracy comparison (final epoch)
+# ---------------------------------------------------------------------------
+
+
+def plot_class_accuracy(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/class_accuracy.png",
+) -> None:
+    """Bar/line chart of final test accuracy broken down by class.
+
+    Shows which classes each optimizer handles best and worst.  Useful for
+    spotting optimizers that boost overall accuracy at the cost of hard or
+    minority classes.
+
+    Layout
+    ------
+    One subplot per (dataset × model) combination.
+
+    * **≤ 20 classes** — grouped bar chart: one cluster per class, one bar
+      per optimizer, coloured by optimizer.
+    * **> 20 classes** — line plot: x = class ID, y = final accuracy.  Bar
+      clusters become illegible for CIFAR-100 (100 classes) or Tiny ImageNet
+      (200 classes), so lines are used instead.
+
+    Silently skips runs whose ``history["class_acc"]`` is empty.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of optimizer/series names (for colour lookup)
+    opt_colors     : {series_name: colour}
+    save_path      : file path to save; ``None`` / ``''`` disables saving.
+    """
+    combos = [(ds, mdl) for ds in dataset_names for mdl in model_names]
+    n_rows = len(combos)
+    if n_rows == 0:
+        return
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(11, 5 * n_rows), squeeze=False)
+    fig.suptitle("Per-Class Test Accuracy (final epoch)", fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Class ID", fontsize=9)
+        ax.set_ylabel("Test Accuracy (%)", fontsize=9)
+        ax.set_ylim(0, 105)
+
+        # Collect final per-class accuracies for each optimizer
+        opt_class_accs: dict[str, dict[int, float]] = {}
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history = results[key3]
+            ca = history.get("class_acc", {})
+            if not ca:
+                continue
+            # Take the last epoch value for each class
+            opt_class_accs[opt_name] = {
+                cls_id: vals[-1] * 100
+                for cls_id, vals in ca.items()
+                if vals
+            }
+
+        if not opt_class_accs:
+            continue
+
+        all_classes = sorted({c for d in opt_class_accs.values() for c in d})
+        n_classes   = len(all_classes)
+        n_opts      = len(opt_class_accs)
+
+        if n_classes <= 20:
+            # Grouped bars
+            bar_width = 0.8 / max(n_opts, 1)
+            for i, (opt_name, class_acc) in enumerate(opt_class_accs.items()):
+                x_offsets = [
+                    j + (i - n_opts / 2 + 0.5) * bar_width
+                    for j, _ in enumerate(all_classes)
+                ]
+                heights = [class_acc.get(c, 0.0) for c in all_classes]
+                ax.bar(x_offsets, heights, width=bar_width * 0.9,
+                       color=opt_colors[opt_name], alpha=0.85, label=opt_name)
+            ax.set_xticks(range(n_classes))
+            ax.set_xticklabels([str(c) for c in all_classes], fontsize=8)
+        else:
+            # Line plot for many classes
+            for opt_name, class_acc in opt_class_accs.items():
+                xs = all_classes
+                ys = [class_acc.get(c, float("nan")) for c in xs]
+                ax.plot(xs, ys, "-", color=opt_colors[opt_name],
+                        label=opt_name, linewidth=1.5, alpha=0.85)
+            ax.set_xlim(all_classes[0] - 0.5, all_classes[-1] + 0.5)
+
+        ax.axhline(y=100 / n_classes * 100 / 100,   # chance level — always 1/n_classes
+                   color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Per-class accuracy figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Training instability (batch loss std vs epoch)
+# ---------------------------------------------------------------------------
+
+
+def plot_instability(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/instability.png",
+) -> None:
+    """Plot training instability (within-epoch batch loss std) vs epoch.
+
+    A high value at a given epoch means per-batch losses were highly variable
+    within that epoch — indicative of a rough loss surface or an overly large
+    learning rate.  A smoothly declining curve suggests the optimizer is
+    settling into a stable region.
+
+    One subplot per (dataset × model) combination.  A dashed y=0 reference
+    line is drawn since std = 0 would mean every batch had identical loss.
+
+    Silently skips runs whose ``history["batch_loss_std"]`` is empty.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of optimizer/series names (for colour lookup)
+    opt_colors     : {series_name: colour}
+    save_path      : file path to save; ``None`` / ``''`` disables saving.
+    """
+    combos = [(ds, mdl) for ds in dataset_names for mdl in model_names]
+    n_rows = len(combos)
+    if n_rows == 0:
+        return
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(9, 4.5 * n_rows), squeeze=False)
+    fig.suptitle("Training Instability (within-epoch batch loss std)", fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Epoch", fontsize=9)
+        ax.set_ylabel("Batch loss std (within epoch)", fontsize=9)
+        ax.set_ylim(bottom=0)
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history = results[key3]
+            vals = history.get("batch_loss_std", [])
+            if not vals:
+                continue
+
+            epochs = list(range(1, len(vals) + 1))
+            color  = opt_colors[opt_name]
+            ax.plot(epochs, vals, "o-", color=color, label=opt_name,
+                    linewidth=1.8, markersize=4)
+
+            # Error bands when seed-averaged std is available
+            std_vals = history.get("batch_loss_std_std", [])
+            if std_vals and len(std_vals) == len(vals):
+                lo = [max(0.0, v - s) for v, s in zip(vals, std_vals)]
+                hi = [v + s for v, s in zip(vals, std_vals)]
+                ax.fill_between(epochs, lo, hi, color=color, alpha=0.15)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Instability figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Effective step size (||w_t - w_{t-1}|| per layer, vs epoch)
+# ---------------------------------------------------------------------------
+
+
+def plot_step_size(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/step_size.png",
+) -> None:
+    """Plot the per-epoch effective step size (weight-space displacement).
+
+    Each epoch's value is the mean across all Linear layers of
+    ``||w_t - w_{t-1}||_2`` — the actual distance the optimizer moved the
+    weights in a single epoch.  This is distinct from the gradient norm
+    (which measures how large the gradient is *before* the optimizer applies
+    its update rule) and from weight distance from init (which is cumulative).
+
+    Adaptive methods like Adam typically show a *decreasing* step size as
+    the second-moment estimates grow and dampen the effective learning rate.
+    SGD+Momentum tends to keep a more constant step size relative to the
+    gradient norm.
+
+    One subplot per (dataset × model) combination.  Silently skips runs
+    whose ``history["step_size"]`` is empty.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of optimizer/series names (for colour lookup)
+    opt_colors     : {series_name: colour}
+    save_path      : file path to save; ``None`` / ``''`` disables saving.
+    """
+    combos = [(ds, mdl) for ds in dataset_names for mdl in model_names]
+    n_rows = len(combos)
+    if n_rows == 0:
+        return
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(9, 4.5 * n_rows), squeeze=False)
+    fig.suptitle("Effective Step Size (mean ||w_t − w_{t-1}||₂ across layers)",
+                 fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Epoch", fontsize=9)
+        ax.set_ylabel("mean ||w_t − w_{t-1}||₂", fontsize=9)
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history = results[key3]
+            ss_dict = history.get("step_size", {})
+            if not ss_dict:
+                continue
+
+            # Average step size across all layers
+            n_epochs  = max(len(v) for v in ss_dict.values() if v)
+            mean_step = []
+            for e in range(n_epochs):
+                layer_vals = [
+                    ss_dict[lyr][e]
+                    for lyr in ss_dict
+                    if e < len(ss_dict[lyr]) and not math.isnan(ss_dict[lyr][e])
+                ]
+                mean_step.append(sum(layer_vals) / len(layer_vals) if layer_vals else float("nan"))
+
+            epochs = list(range(1, n_epochs + 1))
+            color  = opt_colors[opt_name]
+            ax.plot(epochs, mean_step, "o-", color=color, label=opt_name,
+                    linewidth=1.8, markersize=4)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Step size figure saved to {save_path}")
+
+    plt.show()

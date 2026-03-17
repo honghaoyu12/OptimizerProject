@@ -178,13 +178,15 @@ def test_num_seeds_one_no_std_keys():
     """num_seeds=1 produces no aggregation '_std' keys (identical to current behaviour).
 
     Note: ``grad_norm_std`` is a native per-epoch key from ``train_one_epoch``
-    (within-epoch per-batch gradient-norm std) and is therefore excluded from
-    the check.
+    (within-epoch per-batch gradient-norm std) and ``batch_loss_std`` is a
+    native per-epoch key measuring within-epoch batch loss variance — both are
+    therefore excluded from the check.
     """
     results = _run(num_seeds=1)
     hist = next(iter(results.values()))
-    # Exclude the pre-existing native grad_norm_std key
-    agg_std_keys = [k for k in hist if k.endswith("_std") and k != "grad_norm_std"]
+    # Exclude native per-epoch _std keys that are not aggregation artefacts
+    _native_std_keys = {"grad_norm_std", "batch_loss_std"}
+    agg_std_keys = [k for k in hist if k.endswith("_std") and k not in _native_std_keys]
     assert agg_std_keys == []
 
 
@@ -327,3 +329,53 @@ def test_ece_aggregated_for_multi_seed():
     assert "ece" in hist
     assert len(hist["ece"]) == 2
     assert all(0.0 <= v <= 1.0 for v in hist["ece"])
+
+
+def test_class_acc_present_single_seed():
+    """Single-seed run has 'class_acc' dict with int keys and per-epoch lists."""
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "class_acc" in hist
+    assert isinstance(hist["class_acc"], dict)
+    # illcond is a 2-class dataset — expect keys 0 and 1
+    assert len(hist["class_acc"]) == 2
+    for cls_id, vals in hist["class_acc"].items():
+        assert isinstance(cls_id, int)
+        assert len(vals) == 2
+
+
+def test_class_acc_aggregated_for_multi_seed():
+    """num_seeds=2 → class_acc is averaged across seeds."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "class_acc" in hist
+    for vals in hist["class_acc"].values():
+        assert len(vals) == 2
+
+
+def test_batch_loss_std_present():
+    """Single-seed run has 'batch_loss_std' list with one entry per epoch."""
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "batch_loss_std" in hist
+    assert len(hist["batch_loss_std"]) == 2
+    assert all(v >= 0.0 for v in hist["batch_loss_std"])
+
+
+def test_step_size_present_single_seed():
+    """Single-seed run has 'step_size' dict with per-layer lists."""
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "step_size" in hist
+    assert isinstance(hist["step_size"], dict)
+    for layer_vals in hist["step_size"].values():
+        assert len(layer_vals) == 2
+
+
+def test_step_size_aggregated_for_multi_seed():
+    """num_seeds=2 → step_size is aggregated (averaged) across seeds."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "step_size" in hist
+    for layer_vals in hist["step_size"].values():
+        assert len(layer_vals) == 2

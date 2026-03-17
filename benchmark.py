@@ -54,7 +54,8 @@ from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
 from report import generate_report
 from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity_scores,
                         plot_grad_flow_heatmap, plot_optimizer_states, plot_efficiency_frontier,
-                        plot_weight_distance, plot_hp_heatmap, plot_grad_snr)
+                        plot_weight_distance, plot_hp_heatmap, plot_grad_snr,
+                        plot_class_accuracy, plot_instability, plot_step_size)
 
 
 # ---------------------------------------------------------------------------
@@ -331,8 +332,8 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         "train_loss", "test_loss", "train_acc", "test_acc", "learning_rates",
         "grad_norm_global", "grad_norm_before_clip", "grad_norm_std", "time_elapsed",
         "test_acc_ema", "steps_at_epoch_end",
-        # ECE is a scalar per epoch — averaged like accuracy
-        "ece",
+        # ECE and instability are scalars per epoch — averaged like accuracy
+        "ece", "batch_loss_std",
     ]
     for key in list_keys:
         vals = [h.get(key) or [] for h in histories]
@@ -360,7 +361,8 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         arr = np.array([v[:min_len] for v in non_empty], dtype=float)
         result["step_losses"] = arr.mean(axis=0).tolist()
 
-    for key in ("weight_norms", "grad_norms", "weight_distance", "grad_snr"):
+    for key in ("weight_norms", "grad_norms", "weight_distance", "grad_snr",
+                "class_acc", "step_size"):
         dicts = [h.get(key, {}) for h in histories]
         all_subkeys: set = set()
         for d in dicts:
@@ -725,6 +727,12 @@ def parse_args():
                         "only generated when both --lrs and --weight-decays have ≥2 values)")
     p.add_argument("--save-grad-snr", default="plots/grad_snr.png",
                    help="Path to save gradient SNR figure ('' to disable)")
+    p.add_argument("--save-class-accuracy", default="plots/class_accuracy.png",
+                   help="Path to save per-class accuracy figure ('' to disable)")
+    p.add_argument("--save-instability", default="plots/instability.png",
+                   help="Path to save training instability figure ('' to disable)")
+    p.add_argument("--save-step-size", default="plots/step_size.png",
+                   help="Path to save effective step-size figure ('' to disable)")
     p.add_argument("--auto-lr", action="store_true",
                    help="Run a learning-rate range test (LR finder) before each "
                         "(optimizer, dataset, model) combination and use the found LR "
@@ -880,6 +888,21 @@ def main():
     if args.save_grad_snr:
         plot_grad_snr(results, dataset_names, model_names, series_names,
                       opt_colors, save_path=args.save_grad_snr)
+
+    # ── Per-Class Accuracy ─────────────────────────────────────────────────
+    if args.save_class_accuracy:
+        plot_class_accuracy(results, dataset_names, model_names, series_names,
+                            opt_colors, save_path=args.save_class_accuracy)
+
+    # ── Training Instability ───────────────────────────────────────────────
+    if args.save_instability:
+        plot_instability(results, dataset_names, model_names, series_names,
+                         opt_colors, save_path=args.save_instability)
+
+    # ── Effective Step Size ────────────────────────────────────────────────
+    if args.save_step_size:
+        plot_step_size(results, dataset_names, model_names, series_names,
+                       opt_colors, save_path=args.save_step_size)
 
     # ── HP Robustness Heatmap ─────────────────────────────────────────────
     if (args.save_hp_heatmap

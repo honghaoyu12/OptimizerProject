@@ -801,6 +801,46 @@ def compute_ece(
     return ece
 
 
+@torch.no_grad()
+def per_class_accuracy(
+    model: nn.Module,
+    loader: "DataLoader",
+    device: "torch.device",
+) -> dict[int, float]:
+    """Per-class test accuracy in a single forward pass.
+
+    For each class present in *loader*, computes the fraction of samples
+    predicted correctly.  Class IDs are inferred from the labels seen in
+    the loader — no explicit ``num_classes`` argument is required.
+
+    Parameters
+    ----------
+    model  : nn.Module — set to eval() mode internally
+    loader : DataLoader providing (images, labels) batches
+    device : torch.device
+
+    Returns
+    -------
+    dict[int, float]
+        Mapping from class ID (int) to accuracy in [0, 1].  Only classes
+        that appear in the loader are included as keys.
+    """
+    from collections import defaultdict
+    model.eval()
+    correct: dict[int, int] = defaultdict(int)
+    total:   dict[int, int] = defaultdict(int)
+
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+        preds = model(images).argmax(dim=1)
+        for pred, label in zip(preds, labels):
+            c = label.item()
+            total[c]   += 1
+            correct[c] += int(pred.item() == c)
+
+    return {c: correct[c] / total[c] for c in sorted(total.keys())}
+
+
 # ---------------------------------------------------------------------------
 # Multi-epoch training (shared by train.py and benchmark.py)
 # ---------------------------------------------------------------------------
@@ -946,6 +986,22 @@ def run_training(
         # Useful for plotting accuracy vs compute (steps) rather than epochs,
         # which gives a fairer comparison when batch sizes or epoch counts differ.
         "steps_at_epoch_end": [],
+        # Per-class test accuracy each epoch.  Keys are class IDs (ints);
+        # values are per-epoch accuracy lists.  Populated lazily via setdefault
+        # so no prior knowledge of num_classes is needed.  Useful for spotting
+        # optimizers that sacrifice hard or minority classes for overall accuracy.
+        "class_acc": {},
+        # Standard deviation of per-batch training losses within each epoch.
+        # A high value means the loss surface is rough and the per-batch updates
+        # are inconsistent (typical of high-LR or noisy-gradient regimes).
+        # A low value indicates stable, consistent training.
+        "batch_loss_std": [],
+        # Per-Linear-layer effective step size: ||w_t - w_{t-1}||_2 per epoch.
+        # Measures how large each optimizer step actually is in weight space,
+        # independent of the gradient magnitude.  Adaptive methods show a
+        # decreasing step size as second moments grow; SGD keeps a roughly
+        # constant ratio to the gradient norm.
+        "step_size": {n: [] for n in layer_names},
     }
 
     # ── EMA setup ──────────────────────────────────────────────────────────
@@ -968,6 +1024,18 @@ def run_training(
         if isinstance(_mod, nn.Linear):
             _init_linear_weights[layer_names[_widx]] = _mod.weight.detach().clone()
             _widx += 1
+
+    # ── Previous-epoch weight snapshot (for step_size tracking) ───────────
+    # Updated at the end of every epoch so that on the *next* epoch we can
+    # compute ||w_t - w_{t-1}||_2 (the actual per-epoch parameter update
+    # magnitude in weight space).  Initialised to the same values as
+    # _init_linear_weights so epoch-1's step_size == weight_distance[1].
+    # IMPORTANT: use detach().clone() — without detach() we hold a live
+    # autograd reference; without clone() we'd store a view that gets
+    # silently overwritten when the model updates its weights.
+    _prev_linear_weights: dict[str, torch.Tensor] = {
+        n: _init_linear_weights[n].clone() for n in layer_names
+    }
 
     # ── SWA setup ──────────────────────────────────────────────────────────
     # AveragedModel maintains a running uniform average of model weights.
@@ -1058,17 +1126,48 @@ def run_training(
         history["step_losses"].extend(epoch_result["step_losses"])
         history["steps_at_epoch_end"].append(len(history["step_losses"]))
 
+        # Effective step size: ||w_t - w_{t-1}||_2 per Linear layer.
+        # Measures the actual weight-space displacement from the previous epoch
+        # to this one.  Computed before updating _prev_linear_weights so that
+        # the comparison is always "current vs immediately prior epoch".
+        _sidx = 0
+        for _mod in model.modules():
+            if isinstance(_mod, nn.Linear):
+                _name = layer_names[_sidx]
+                _step = (_mod.weight.detach() - _prev_linear_weights[_name]).norm().item()
+                history["step_size"][_name].append(_step)
+                # Update snapshot for next epoch — clone() prevents a dangling
+                # view into parameter storage (same safety rule as _init_linear_weights)
+                _prev_linear_weights[_name] = _mod.weight.detach().clone()
+                _sidx += 1
+
         for n in layer_names:
             history["weight_norms"][n].append(w_norms.get(n, float("nan")))
             history["grad_norms"][n].append(epoch_result["grad_norms_per_layer"].get(n, float("nan")))
             history["weight_distance"][n].append(w_dists.get(n, float("nan")))
             history["grad_snr"][n].append(epoch_result["grad_snr_per_layer"].get(n, float("nan")))
 
+        # Training instability: std of per-batch losses within this epoch.
+        # A large value means individual batches produced very different losses —
+        # a signal of rough loss landscape or overly large learning rate.
+        import statistics as _stats
+        _epoch_step_losses = epoch_result["step_losses"]
+        _batch_loss_std = (
+            _stats.stdev(_epoch_step_losses) if len(_epoch_step_losses) > 1 else 0.0
+        )
+        history["batch_loss_std"].append(_batch_loss_std)
+
         # Calibration — one-pass ECE evaluation on the test set.
         # Computed on the *raw* model weights (not EMA / SWA) so the value
         # tracks how calibration evolves with the primary optimisation trajectory.
         ece_val = compute_ece(model, test_loader, device)
         history["ece"].append(ece_val)
+
+        # Per-class accuracy — single forward pass over the test set.
+        # Keys are class IDs (int); populated lazily so no num_classes needed.
+        cls_acc = per_class_accuracy(model, test_loader, device)
+        for cls_id, cls_val in cls_acc.items():
+            history["class_acc"].setdefault(cls_id, []).append(cls_val)
 
         # Optimizer internal state snapshot
         _states = _extract_optimizer_states(model, optimizer, layer_names)
