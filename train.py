@@ -601,6 +601,10 @@ def train_one_epoch(
     # Together with grad_accum (sum of norms), this lets us compute
     # SNR = mean_norm / std_norm without storing all per-batch tensors.
     grad_sq_accum = {n: 0.0 for n in layer_names}
+    # Accumulates the actual gradient tensor per layer (not just the norm).
+    # Divided by num_batches after the loop to give the mean gradient direction,
+    # which is used upstream to compute cosine similarity between epochs.
+    grad_vec_accum: dict[str, torch.Tensor | None] = {n: None for n in layer_names}
     num_batches = 0
     step_losses: list[float] = []
     all_raw_norms: list[float] = []   # pre-clip per-param norms across all batches
@@ -634,16 +638,22 @@ def train_one_epoch(
         else:
             loss.backward()
 
-        # Accumulate gradient norms per linear layer (always full precision here).
-        # Both the norm and its square are tracked so we can later compute
-        # SNR = mean_norm / std_norm without keeping all per-batch tensors.
+        # Accumulate gradient norms and gradient vectors per linear layer.
+        # Norms: both sum and sum-of-squares for SNR = mean/std computation.
+        # Vectors: running sum of weight.grad tensors; divided by num_batches
+        # after the loop to give the mean gradient direction for this epoch.
         idx = 0
         for module in model.modules():
             if isinstance(module, nn.Linear):
                 if module.weight.grad is not None:
-                    _gnorm = module.weight.grad.norm().item()
+                    _g = module.weight.grad.detach()
+                    _gnorm = _g.norm().item()
                     grad_accum[layer_names[idx]]    += _gnorm
                     grad_sq_accum[layer_names[idx]] += _gnorm * _gnorm
+                    if grad_vec_accum[layer_names[idx]] is None:
+                        grad_vec_accum[layer_names[idx]] = _g.clone()
+                    else:
+                        grad_vec_accum[layer_names[idx]].add_(_g)
                 idx += 1
 
         # Pre-clip global gradient norm for this batch
@@ -686,6 +696,13 @@ def train_one_epoch(
     n = len(loader.dataset)
     avg_grad_norms = {name: total / num_batches for name, total in grad_accum.items()}
 
+    # Mean gradient vector per layer (for cosine similarity between epochs).
+    # Divide accumulated sum by number of batches; leave as None if no grad.
+    mean_grad_vec: dict[str, torch.Tensor | None] = {}
+    for name in layer_names:
+        acc = grad_vec_accum[name]
+        mean_grad_vec[name] = (acc / num_batches) if (acc is not None and num_batches > 0) else None
+
     import statistics
     grad_norm_global = float(sum(g ** 2 for g in all_grad_norms) ** 0.5) if all_grad_norms else 0.0
     grad_norm_before_clip = float(sum(g ** 2 for g in all_raw_norms) ** 0.5) if all_raw_norms else 0.0
@@ -716,6 +733,8 @@ def train_one_epoch(
         "step_losses": step_losses,
         # Per-layer gradient signal-to-noise ratio (see above).
         "grad_snr_per_layer": grad_snr,
+        # Mean gradient vector per Linear layer (for cosine similarity tracking).
+        "mean_grad_vec_per_layer": mean_grad_vec,
     }
 
 
@@ -860,6 +879,7 @@ def run_training(
     resume_from: str | None = None,
     ema_decay: float | None = None,
     swa_start: int | None = None,
+    track_sharpness: bool = False,
 ) -> dict:
     """Train *model* for *epochs* and return a history dict.
 
@@ -1002,6 +1022,12 @@ def run_training(
         # decreasing step size as second moments grow; SGD keeps a roughly
         # constant ratio to the gradient norm.
         "step_size": {n: [] for n in layer_names},
+        # Cosine similarity between consecutive epochs' mean gradient directions,
+        # per Linear layer.  Epoch 1 has no prior direction → float('nan').
+        # Values near 1 = very consistent gradient direction across epochs (stable
+        # training); near 0 = the gradient direction is rotating (oscillating);
+        # negative = the gradient has reversed direction (diverging or oscillating).
+        "grad_cosine_sim": {n: [] for n in layer_names},
     }
 
     # ── EMA setup ──────────────────────────────────────────────────────────
@@ -1037,6 +1063,11 @@ def run_training(
         n: _init_linear_weights[n].clone() for n in layer_names
     }
 
+    # ── Previous-epoch mean gradient direction (for cosine similarity) ────
+    # Stores the mean gradient vector from the previous epoch per layer.
+    # Initialised to None; epoch 1 records nan since there is no prior epoch.
+    _prev_mean_grad: dict[str, torch.Tensor | None] = {n: None for n in layer_names}
+
     # ── SWA setup ──────────────────────────────────────────────────────────
     # AveragedModel maintains a running uniform average of model weights.
     # update_parameters() is called after each training epoch >= swa_start.
@@ -1064,9 +1095,10 @@ def run_training(
             print(f"\n  Resumed from {resume_from} (epoch {ckpt['epoch']}). "
                   f"Continuing from epoch {start_epoch}.")
 
-    # Fixed batch for Hessian/sharpness (reuse same batch each epoch)
+    # Fixed batch for Hessian/sharpness (reuse same batch each epoch).
+    # Grabbed whenever either the Hessian trace or sharpness tracking is active.
     hessian_batch = None
-    if compute_hessian:
+    if compute_hessian or track_sharpness:
         for batch in train_loader:
             hessian_batch = batch
             break
@@ -1201,15 +1233,39 @@ def run_training(
                 history["convergence_epochs"][_tkey] = epoch
                 history["convergence_times"][_tkey]  = elapsed
 
-        # Hessian / sharpness
+        # Hessian trace (expensive: requires create_graph backward)
         if compute_hessian and hessian_batch is not None:
             ht = compute_hessian_trace(model, hessian_batch, criterion_hessian, device)
-            sh = compute_sharpness(model, hessian_batch, criterion_hessian, device)
         else:
             ht = float("nan")
-            sh = float("nan")
         history["hessian_trace"].append(ht)
+
+        # Sharpness: max loss increase under a small random weight perturbation.
+        # Decoupled from the Hessian trace — much cheaper (no backward pass).
+        # Enabled either by the full --hessian flag or the lighter --sharpness flag.
+        if (compute_hessian or track_sharpness) and hessian_batch is not None:
+            sh = compute_sharpness(model, hessian_batch, criterion_hessian, device)
+        else:
+            sh = float("nan")
         history["sharpness"].append(sh)
+
+        # Gradient cosine similarity: cosine(mean_grad_t, mean_grad_{t-1}) per layer.
+        # First epoch has no prior direction → float('nan').  Values near 1 indicate
+        # the gradient direction is highly consistent across epochs; values near 0
+        # suggest the gradient is rotating (oscillatory or chaotic training).
+        curr_grad_vecs = epoch_result["mean_grad_vec_per_layer"]
+        for n in layer_names:
+            curr = curr_grad_vecs.get(n)
+            prev = _prev_mean_grad.get(n)
+            if curr is not None and prev is not None:
+                cos_sim = torch.nn.functional.cosine_similarity(
+                    curr.flatten().unsqueeze(0),
+                    prev.flatten().unsqueeze(0),
+                ).item()
+            else:
+                cos_sim = float("nan")
+            history["grad_cosine_sim"][n].append(cos_sim)
+            _prev_mean_grad[n] = curr.detach().clone() if curr is not None else None
 
         if scheduler is not None:
             scheduler.step()

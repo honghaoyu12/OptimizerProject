@@ -8,7 +8,8 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
                         plot_grad_flow_heatmap, plot_optimizer_states,
                         plot_efficiency_frontier, _pareto_frontier,
                         _compute_lr_sensitivity, plot_weight_distance, plot_hp_heatmap,
-                        plot_grad_snr, plot_class_accuracy, plot_instability, plot_step_size)
+                        plot_grad_snr, plot_class_accuracy, plot_instability, plot_step_size,
+                        plot_sharpness, plot_grad_cosine_sim)
 
 
 # ---------------------------------------------------------------------------
@@ -953,3 +954,85 @@ class TestStepSizePlot:
             save_path=str(out),
         )
         assert out.exists()
+
+
+class TestSharpnessPlot:
+    """Tests for plot_sharpness()."""
+
+    def _make_results(self, opt_name="Adam", all_nan=False):
+        import math
+        vals = [float("nan")] * 3 if all_nan else [0.05, 0.04, 0.03]
+        return {("MNIST", "MLP", opt_name): {"sharpness": vals}}
+
+    def test_runs_without_error(self):
+        """plot_sharpness() runs without raising."""
+        plot_sharpness(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=None,
+        )
+
+    def test_saves_file(self, tmp_path):
+        """plot_sharpness() writes a file when save_path is set."""
+        out = tmp_path / "sharpness.png"
+        plot_sharpness(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_all_nan_no_error(self):
+        """All-nan sharpness (disabled) renders without error."""
+        plot_sharpness(
+            self._make_results(all_nan=True),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=None,
+        )
+
+
+class TestGradCosinePlot:
+    """Tests for plot_grad_cosine_sim()."""
+
+    def _make_results(self, opt_name="Adam"):
+        import math
+        # Epoch 1 is nan (no prior); epochs 2-3 have valid values
+        return {("MNIST", "MLP", opt_name): {
+            "grad_cosine_sim": {
+                "layer_0": [float("nan"), 0.9, 0.85],
+                "layer_1": [float("nan"), 0.8, 0.75],
+            }
+        }}
+
+    def test_runs_without_error(self):
+        """plot_grad_cosine_sim() runs without raising."""
+        plot_grad_cosine_sim(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=None,
+        )
+
+    def test_saves_file(self, tmp_path):
+        """plot_grad_cosine_sim() writes a file when save_path is set."""
+        out = tmp_path / "grad_cosine_sim.png"
+        plot_grad_cosine_sim(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_empty_dict_no_error(self):
+        """Empty grad_cosine_sim dict renders without error."""
+        results = {("MNIST", "MLP", "Adam"): {"grad_cosine_sim": {}}}
+        plot_grad_cosine_sim(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=None,
+        )

@@ -155,7 +155,7 @@ class TestTrainingLoop:
         assert set(result.keys()) == {
             "loss", "acc", "grad_norms_per_layer",
             "grad_norm_global", "grad_norm_std", "grad_norm_before_clip", "step_losses",
-            "grad_snr_per_layer",
+            "grad_snr_per_layer", "mean_grad_vec_per_layer",
         }
 
     def test_train_one_epoch_loss_finite(self):
@@ -1490,3 +1490,112 @@ class TestEffectiveStepSize:
         history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
         for layer, vals in history["step_size"].items():
             assert vals[0] > 0.0, f"Zero step size at epoch 1 for {layer}"
+
+
+class TestSharpness:
+    """Tests for history['sharpness'] with track_sharpness=True."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_sharpness_key_present(self):
+        """run_training() always returns 'sharpness' list in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "sharpness" in history
+        assert isinstance(history["sharpness"], list)
+
+    def test_sharpness_length_equals_epochs(self):
+        """sharpness list has one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        assert len(history["sharpness"]) == n_epochs
+
+    def test_sharpness_finite_when_track_sharpness_true(self):
+        """With track_sharpness=True, sharpness values are finite (not nan)."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln,
+                               verbose=False, track_sharpness=True)
+        import math
+        assert all(math.isfinite(v) for v in history["sharpness"]), (
+            "Expected finite sharpness values; got: " + str(history["sharpness"])
+        )
+
+    def test_sharpness_nan_when_disabled(self):
+        """With track_sharpness=False (default), sharpness values are nan."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        import math
+        assert all(math.isnan(v) for v in history["sharpness"]), (
+            "Expected nan sharpness when track_sharpness=False"
+        )
+
+
+class TestGradCosineSim:
+    """Tests for history['grad_cosine_sim'] in run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_key_present(self):
+        """run_training() returns 'grad_cosine_sim' dict in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "grad_cosine_sim" in history
+        assert isinstance(history["grad_cosine_sim"], dict)
+
+    def test_per_layer_keys_match_weight_norms(self):
+        """grad_cosine_sim has the same layer keys as weight_norms."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert set(history["grad_cosine_sim"].keys()) == set(history["weight_norms"].keys())
+
+    def test_length_equals_epochs_per_layer(self):
+        """Each layer list has one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        for layer, vals in history["grad_cosine_sim"].items():
+            assert len(vals) == n_epochs, f"Layer {layer}: expected {n_epochs}, got {len(vals)}"
+
+    def test_epoch1_is_nan(self):
+        """Epoch 1 has no prior gradient direction — value should be nan."""
+        import math
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for layer, vals in history["grad_cosine_sim"].items():
+            assert math.isnan(vals[0]), f"Layer {layer} epoch-1 should be nan, got {vals[0]}"
+
+    def test_epoch2_in_valid_range(self):
+        """Epoch 2+ cosine similarities are in [-1, 1]."""
+        import math
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 3, ln, verbose=False)
+        for layer, vals in history["grad_cosine_sim"].items():
+            for e, v in enumerate(vals[1:], start=2):
+                assert not math.isnan(v), f"Layer {layer} epoch {e} is nan"
+                assert -1.01 <= v <= 1.01, f"Layer {layer} epoch {e} out of range: {v}"

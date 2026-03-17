@@ -379,3 +379,50 @@ def test_step_size_aggregated_for_multi_seed():
     assert "step_size" in hist
     for layer_vals in hist["step_size"].values():
         assert len(layer_vals) == 2
+
+
+def test_sharpness_nan_by_default():
+    """sharpness key is present but all-nan when track_sharpness not enabled."""
+    import math
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "sharpness" in hist
+    assert all(math.isnan(v) for v in hist["sharpness"])
+
+
+def test_sharpness_finite_when_enabled():
+    """sharpness values are finite when track_sharpness=True."""
+    import math
+    results = _run(epochs=2, track_sharpness=True)
+    hist = next(iter(results.values()))
+    assert "sharpness" in hist
+    assert all(math.isfinite(v) for v in hist["sharpness"])
+
+
+def test_sharpness_aggregated_for_multi_seed():
+    """num_seeds=2 + track_sharpness=True → sharpness averaged across seeds."""
+    import math
+    results = _run(num_seeds=2, seed=0, epochs=2, track_sharpness=True)
+    hist = next(iter(results.values()))
+    assert "sharpness" in hist
+    assert len(hist["sharpness"]) == 2
+    assert all(math.isfinite(v) for v in hist["sharpness"])
+
+
+def test_grad_cosine_sim_present_single_seed():
+    """Single-seed run has 'grad_cosine_sim' dict with per-layer lists."""
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "grad_cosine_sim" in hist
+    assert isinstance(hist["grad_cosine_sim"], dict)
+    for layer_vals in hist["grad_cosine_sim"].values():
+        assert len(layer_vals) == 2
+
+
+def test_grad_cosine_sim_aggregated_for_multi_seed():
+    """num_seeds=2 → grad_cosine_sim is aggregated (averaged) across seeds."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "grad_cosine_sim" in hist
+    for layer_vals in hist["grad_cosine_sim"].values():
+        assert len(layer_vals) == 2

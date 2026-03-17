@@ -55,7 +55,8 @@ from report import generate_report
 from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity_scores,
                         plot_grad_flow_heatmap, plot_optimizer_states, plot_efficiency_frontier,
                         plot_weight_distance, plot_hp_heatmap, plot_grad_snr,
-                        plot_class_accuracy, plot_instability, plot_step_size)
+                        plot_class_accuracy, plot_instability, plot_step_size,
+                        plot_sharpness, plot_grad_cosine_sim)
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +335,8 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         "test_acc_ema", "steps_at_epoch_end",
         # ECE and instability are scalars per epoch — averaged like accuracy
         "ece", "batch_loss_std",
+        # Sharpness is a scalar per epoch (nan when track_sharpness=False)
+        "sharpness",
     ]
     for key in list_keys:
         vals = [h.get(key) or [] for h in histories]
@@ -362,7 +365,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         result["step_losses"] = arr.mean(axis=0).tolist()
 
     for key in ("weight_norms", "grad_norms", "weight_distance", "grad_snr",
-                "class_acc", "step_size"):
+                "class_acc", "step_size", "grad_cosine_sim"):
         dicts = [h.get(key, {}) for h in histories]
         all_subkeys: set = set()
         for d in dicts:
@@ -480,6 +483,7 @@ def run_benchmark(
     label_smoothing: float = 0.0,
     swa_start: int | None = None,
     auto_lr: bool = False,
+    track_sharpness: bool = False,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -617,6 +621,7 @@ def run_benchmark(
                                 amp=amp,
                                 ema_decay=ema_decay,
                                 swa_start=swa_start,
+                                track_sharpness=track_sharpness,
                             )
                             seed_histories.append(history)
 
@@ -733,6 +738,13 @@ def parse_args():
                    help="Path to save training instability figure ('' to disable)")
     p.add_argument("--save-step-size", default="plots/step_size.png",
                    help="Path to save effective step-size figure ('' to disable)")
+    p.add_argument("--sharpness", action="store_true",
+                   help="Compute SAM-style sharpness every epoch (small overhead: "
+                        "5 random forward passes on a fixed batch per epoch)")
+    p.add_argument("--save-sharpness", default="plots/sharpness.png",
+                   help="Path to save sharpness-vs-epoch figure ('' to disable)")
+    p.add_argument("--save-grad-cosine-sim", default="plots/grad_cosine_sim.png",
+                   help="Path to save gradient cosine similarity figure ('' to disable)")
     p.add_argument("--auto-lr", action="store_true",
                    help="Run a learning-rate range test (LR finder) before each "
                         "(optimizer, dataset, model) combination and use the found LR "
@@ -847,6 +859,7 @@ def main():
             label_smoothing=args.label_smoothing,
             swa_start=args.swa_start,
             auto_lr=args.auto_lr and args.lrs is None,
+            track_sharpness=args.sharpness,
         )
         logger.close()
 
@@ -903,6 +916,16 @@ def main():
     if args.save_step_size:
         plot_step_size(results, dataset_names, model_names, series_names,
                        opt_colors, save_path=args.save_step_size)
+
+    # ── Sharpness ─────────────────────────────────────────────────────────
+    if args.save_sharpness:
+        plot_sharpness(results, dataset_names, model_names, series_names,
+                       opt_colors, save_path=args.save_sharpness)
+
+    # ── Gradient Cosine Similarity ────────────────────────────────────────
+    if args.save_grad_cosine_sim:
+        plot_grad_cosine_sim(results, dataset_names, model_names, series_names,
+                             opt_colors, save_path=args.save_grad_cosine_sim)
 
     # ── HP Robustness Heatmap ─────────────────────────────────────────────
     if (args.save_hp_heatmap

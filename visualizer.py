@@ -1642,3 +1642,144 @@ def plot_step_size(
         print(f"\n  Step size figure saved to {save_path}")
 
     plt.show()
+
+
+def plot_sharpness(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/sharpness.png",
+) -> None:
+    """Plot SAM-style sharpness vs epoch for each optimizer.
+
+    Sharpness = max loss increase under a random perturbation of radius ε.
+    Only plotted for series where sharpness was actually computed (non-nan
+    values present); series with all-nan sharpness are silently skipped.
+
+    One subplot per (dataset × model) combination.
+    """
+    combos = [(ds, mdl) for ds in dataset_names for mdl in model_names]
+    n_rows = len(combos)
+    if n_rows == 0:
+        return
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(9, 4.5 * n_rows), squeeze=False)
+    fig.suptitle("Loss Landscape Sharpness (SAM-style, ε=0.01)",
+                 fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Epoch", fontsize=9)
+        ax.set_ylabel("Sharpness", fontsize=9)
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history = results[key3]
+            values = history.get("sharpness", [])
+            # Skip series where sharpness was never computed (all nan)
+            finite_vals = [v for v in values if not math.isnan(v)]
+            if not finite_vals:
+                continue
+
+            epochs = list(range(1, len(values) + 1))
+            color  = opt_colors[opt_name]
+            ax.plot(epochs, values, "o-", color=color, label=opt_name,
+                    linewidth=1.8, markersize=4)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Sharpness figure saved to {save_path}")
+
+    plt.show()
+
+
+def plot_grad_cosine_sim(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/grad_cosine_sim.png",
+) -> None:
+    """Plot cosine similarity between consecutive epoch gradient directions.
+
+    Shows how consistent the gradient direction is across epochs for each
+    optimizer.  Values near 1 = very stable gradient direction; near 0 =
+    rotating / oscillating; negative = reversed direction.
+
+    Epoch 1 has no prior direction (nan) and is excluded from the plot.
+    The global mean across all Linear layers is shown per epoch.
+
+    One subplot per (dataset × model) combination.
+    """
+    combos = [(ds, mdl) for ds in dataset_names for mdl in model_names]
+    n_rows = len(combos)
+    if n_rows == 0:
+        return
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(9, 4.5 * n_rows), squeeze=False)
+    fig.suptitle("Gradient Cosine Similarity (consecutive epochs, mean across layers)",
+                 fontsize=13, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Epoch", fontsize=9)
+        ax.set_ylabel("Cosine similarity", fontsize=9)
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history = results[key3]
+            cs_dict = history.get("grad_cosine_sim", {})
+            if not cs_dict:
+                continue
+
+            # Mean cosine similarity across all layers per epoch
+            n_epochs  = max(len(v) for v in cs_dict.values() if v)
+            mean_cs = []
+            for e in range(n_epochs):
+                layer_vals = [
+                    cs_dict[lyr][e]
+                    for lyr in cs_dict
+                    if e < len(cs_dict[lyr]) and not math.isnan(cs_dict[lyr][e])
+                ]
+                mean_cs.append(
+                    sum(layer_vals) / len(layer_vals) if layer_vals else float("nan")
+                )
+
+            # Only plot the epochs where we have a valid value (skip epoch 1 nan)
+            valid_epochs = [e + 1 for e, v in enumerate(mean_cs) if not math.isnan(v)]
+            valid_vals   = [v for v in mean_cs if not math.isnan(v)]
+            if not valid_vals:
+                continue
+
+            color = opt_colors[opt_name]
+            ax.plot(valid_epochs, valid_vals, "o-", color=color, label=opt_name,
+                    linewidth=1.8, markersize=4)
+
+        ax.set_ylim(-1.05, 1.05)
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Gradient cosine similarity figure saved to {save_path}")
+
+    plt.show()
