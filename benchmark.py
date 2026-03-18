@@ -56,7 +56,8 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
                         plot_grad_flow_heatmap, plot_optimizer_states, plot_efficiency_frontier,
                         plot_weight_distance, plot_hp_heatmap, plot_grad_snr,
                         plot_class_accuracy, plot_instability, plot_step_size,
-                        plot_sharpness, plot_grad_cosine_sim)
+                        plot_sharpness, plot_grad_cosine_sim,
+                        plot_grad_conflict, plot_lr_sensitivity_curves)
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +366,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         result["step_losses"] = arr.mean(axis=0).tolist()
 
     for key in ("weight_norms", "grad_norms", "weight_distance", "grad_snr",
-                "class_acc", "step_size", "grad_cosine_sim"):
+                "class_acc", "step_size", "grad_cosine_sim", "grad_conflict"):
         dicts = [h.get(key, {}) for h in histories]
         all_subkeys: set = set()
         for d in dicts:
@@ -745,6 +746,10 @@ def parse_args():
                    help="Path to save sharpness-vs-epoch figure ('' to disable)")
     p.add_argument("--save-grad-cosine-sim", default="plots/grad_cosine_sim.png",
                    help="Path to save gradient cosine similarity figure ('' to disable)")
+    p.add_argument("--save-grad-conflict", default="plots/grad_conflict.png",
+                   help="Path to save gradient conflict figure ('' to disable)")
+    p.add_argument("--save-lr-curves", default="plots/lr_curves.png",
+                   help="Path to save LR sensitivity training curves ('' to disable)")
     p.add_argument("--auto-lr", action="store_true",
                    help="Run a learning-rate range test (LR finder) before each "
                         "(optimizer, dataset, model) combination and use the found LR "
@@ -926,6 +931,15 @@ def main():
     if args.save_grad_cosine_sim:
         plot_grad_cosine_sim(results, dataset_names, model_names, series_names,
                              opt_colors, save_path=args.save_grad_cosine_sim)
+
+    # ── Gradient Conflict ─────────────────────────────────────────────────
+    if args.save_grad_conflict:
+        plot_grad_conflict(results, dataset_names, model_names, series_names,
+                           opt_colors, save_path=args.save_grad_conflict)
+
+    # ── LR Sensitivity Curves ─────────────────────────────────────────────
+    if args.save_lr_curves:
+        plot_lr_sensitivity_curves(results, save_path=args.save_lr_curves)
 
     # ── HP Robustness Heatmap ─────────────────────────────────────────────
     if (args.save_hp_heatmap

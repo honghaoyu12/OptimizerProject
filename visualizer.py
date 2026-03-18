@@ -1783,3 +1783,177 @@ def plot_grad_cosine_sim(
         print(f"\n  Gradient cosine similarity figure saved to {save_path}")
 
     plt.show()
+
+
+def plot_grad_conflict(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/grad_conflict.png",
+) -> None:
+    """Plot gradient conflict (cosine similarity) between adjacent Linear layers.
+
+    For each adjacent pair (L_i, L_{i+1}) sharing hidden dimension h_i, the
+    conflict score is cosine_similarity(G_i.mean(dim=1), G_{i+1}.mean(dim=0))
+    where G_i is the mean gradient matrix of L_i.  Near +1 = layers cooperate
+    on the same hidden units; near -1 = gradient conflict (opposing pressures).
+
+    Silently skipped for single-layer networks (no adjacent pairs) or results
+    whose ``grad_conflict`` dict is empty.  One subplot per (dataset × model).
+    """
+    combos = [(ds, mdl) for ds in dataset_names for mdl in model_names]
+    n_rows = len(combos)
+    if n_rows == 0:
+        return
+
+    fig, axes = plt.subplots(n_rows, 1, figsize=(9, 4.5 * n_rows), squeeze=False)
+    fig.suptitle("Gradient Conflict Between Adjacent Layers\n"
+                 "(cosine similarity along shared hidden dimension; −1 = full conflict)",
+                 fontsize=12, fontweight="bold")
+
+    for row, (ds_name, mdl_name) in enumerate(combos):
+        ax = axes[row][0]
+        ax.set_title(f"{ds_name} / {mdl_name}", fontsize=10)
+        ax.set_xlabel("Epoch", fontsize=9)
+        ax.set_ylabel("Cosine similarity", fontsize=9)
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+
+        for opt_name in optimizer_names:
+            key3 = (ds_name, mdl_name, opt_name)
+            if key3 not in results:
+                continue
+            history = results[key3]
+            gc_dict = history.get("grad_conflict", {})
+            if not gc_dict:
+                continue
+
+            color = opt_colors[opt_name]
+            # One line per adjacent pair; distinguishable via linestyle when many pairs
+            linestyles = ["-", "--", "-.", ":"]
+            for li, (pair_key, vals) in enumerate(gc_dict.items()):
+                if not vals:
+                    continue
+                valid_epochs = [e + 1 for e, v in enumerate(vals) if not math.isnan(v)]
+                valid_vals   = [v for v in vals if not math.isnan(v)]
+                if not valid_vals:
+                    continue
+                ls = linestyles[li % len(linestyles)]
+                label = f"{opt_name} ({pair_key})" if len(gc_dict) > 1 else opt_name
+                ax.plot(valid_epochs, valid_vals, color=color, linestyle=ls,
+                        label=label, linewidth=1.8, marker="o", markersize=4)
+
+        ax.set_ylim(-1.05, 1.05)
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Gradient conflict figure saved to {save_path}")
+
+    plt.show()
+
+
+def plot_lr_sensitivity_curves(
+    results: dict,
+    save_path: str | None = "plots/lr_curves.png",
+) -> None:
+    """Plot full training curves overlaid for each LR value per optimizer.
+
+    Unlike ``plot_lr_sensitivity`` (which shows only final accuracy vs LR),
+    this overlays the complete test-accuracy and train-loss epoch trajectories
+    for every LR value, letting you compare *how fast* each LR converges, not
+    just where it ends up.
+
+    Grouping: series names are split on ``" lr="`` to find the base optimizer
+    name. All series sharing the same base optimizer are overlaid in one subplot,
+    coloured by LR via a sequential colormap.  Silently skipped when no
+    ``config_lr`` is found in results.
+
+    Parameters
+    ----------
+    results   : {(dataset_name, model_name, series_name): history_dict}
+    save_path : file path to save; ``None`` / ``''`` disables saving.
+    """
+    lr_entries = {k: v for k, v in results.items() if v.get("config_lr") is not None}
+    if not lr_entries:
+        print("\n  (LR sensitivity curves skipped: no config_lr found in results)")
+        return
+
+    # Group by (dataset, model, base_optimizer)
+    groups: dict[tuple, list[tuple]] = {}
+    for (ds, mdl, series), hist in lr_entries.items():
+        base_opt = series.split(" lr=")[0].split(" wd=")[0]
+        key = (ds, mdl, base_opt)
+        groups.setdefault(key, []).append((hist.get("config_lr", 0.0), series, hist))
+
+    if not groups:
+        return
+
+    # Two columns: train_loss | test_acc
+    n_rows = len(groups)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4.5 * n_rows), squeeze=False)
+    fig.suptitle("LR Sensitivity: Full Training Curves", fontsize=13, fontweight="bold")
+
+    for row, ((ds_name, mdl_name, base_opt), entries) in enumerate(sorted(groups.items())):
+        entries.sort(key=lambda t: t[0])  # sort by LR ascending
+        lrs_in_group = [e[0] for e in entries]
+
+        # Colormap: map LR index → colour (blue shades or tab colormap)
+        n = len(entries)
+        cmap = plt.get_cmap("viridis" if n > 2 else "Set1")
+        colors = [cmap(i / max(n - 1, 1)) for i in range(n)]
+
+        ax_loss = axes[row][0]
+        ax_acc  = axes[row][1]
+        ax_loss.set_title(f"{ds_name} / {mdl_name} / {base_opt} — Train Loss", fontsize=9)
+        ax_acc.set_title(f"{ds_name} / {mdl_name} / {base_opt} — Test Acc (%)", fontsize=9)
+        ax_loss.set_xlabel("Epoch", fontsize=9)
+        ax_acc.set_xlabel("Epoch", fontsize=9)
+        ax_loss.set_ylabel("Train Loss", fontsize=9)
+        ax_acc.set_ylabel("Test Accuracy (%)", fontsize=9)
+
+        for (lr_val, series, hist), color in zip(entries, colors):
+            train_loss = hist.get("train_loss", [])
+            test_acc   = hist.get("test_acc", [])
+            epochs     = list(range(1, max(len(train_loss), len(test_acc)) + 1))
+            lr_label   = f"lr={lr_val:.0e}" if lr_val < 0.01 else f"lr={lr_val}"
+
+            if train_loss:
+                ax_loss.plot(epochs[:len(train_loss)], train_loss, "o-",
+                             color=color, label=lr_label, linewidth=1.8, markersize=4)
+                std_vals = hist.get("train_loss_std", [])
+                if std_vals and len(std_vals) == len(train_loss):
+                    lo = [v - s for v, s in zip(train_loss, std_vals)]
+                    hi = [v + s for v, s in zip(train_loss, std_vals)]
+                    ax_loss.fill_between(epochs[:len(train_loss)], lo, hi,
+                                         color=color, alpha=0.15)
+
+            if test_acc:
+                acc_pct = [v * 100 for v in test_acc]
+                ax_acc.plot(epochs[:len(acc_pct)], acc_pct, "o-",
+                            color=color, label=lr_label, linewidth=1.8, markersize=4)
+                std_vals = hist.get("test_acc_std", [])
+                if std_vals and len(std_vals) == len(test_acc):
+                    lo = [(v - s) * 100 for v, s in zip(test_acc, std_vals)]
+                    hi = [(v + s) * 100 for v, s in zip(test_acc, std_vals)]
+                    ax_acc.fill_between(epochs[:len(acc_pct)], lo, hi,
+                                        color=color, alpha=0.15)
+
+        ax_loss.legend(fontsize=8)
+        ax_acc.legend(fontsize=8)
+        ax_loss.tick_params(labelsize=8)
+        ax_acc.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  LR sensitivity curves saved to {save_path}")
+
+    plt.show()

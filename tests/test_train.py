@@ -1599,3 +1599,68 @@ class TestGradCosineSim:
             for e, v in enumerate(vals[1:], start=2):
                 assert not math.isnan(v), f"Layer {layer} epoch {e} is nan"
                 assert -1.01 <= v <= 1.01, f"Layer {layer} epoch {e} out of range: {v}"
+
+
+class TestGradConflict:
+    """Tests for history['grad_conflict'] in run_training()."""
+
+    def _make_components(self):
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        model = build_model("mlp", ds_info, [32])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        return model, train_loader, test_loader, criterion, device, layer_names
+
+    def test_key_present(self):
+        """run_training() returns 'grad_conflict' dict in history."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        assert "grad_conflict" in history
+        assert isinstance(history["grad_conflict"], dict)
+
+    def test_pair_keys_format(self):
+        """Keys are 'L_i↔L_{i+1}' strings."""
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for key in history["grad_conflict"]:
+            assert "↔" in key, f"Expected '↔' in key, got: {key}"
+
+    def test_length_equals_epochs_per_pair(self):
+        """Each adjacent-pair list has one entry per epoch."""
+        n_epochs = 3
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, n_epochs, ln, verbose=False)
+        for pair, vals in history["grad_conflict"].items():
+            assert len(vals) == n_epochs, f"{pair}: expected {n_epochs}, got {len(vals)}"
+
+    def test_values_in_range(self):
+        """All conflict values are in [-1, 1]."""
+        import math
+        model, tl, vl, crit, dev, ln = self._make_components()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, tl, vl, opt, crit, dev, 2, ln, verbose=False)
+        for pair, vals in history["grad_conflict"].items():
+            for v in vals:
+                assert not math.isnan(v), f"{pair} has nan"
+                assert -1.01 <= v <= 1.01, f"{pair} value {v} out of range"
+
+    def test_single_layer_empty(self):
+        """A 1-Linear-layer network produces an empty grad_conflict dict."""
+        from synthetic_datasets import SYNTHETIC_LOADERS
+        ds_info = DATASET_INFO["illcond"]
+        # hidden_sizes=[] → single Linear layer (input → output)
+        model = build_model("mlp", ds_info, [])
+        train_loader, test_loader = SYNTHETIC_LOADERS["illcond"](batch_size=64)
+        criterion = torch.nn.CrossEntropyLoss()
+        device = torch.device("cpu")
+        layer_names = linear_layer_names(model)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        history = run_training(model, train_loader, test_loader, opt, criterion,
+                               device, 1, layer_names, verbose=False)
+        assert history["grad_conflict"] == {}

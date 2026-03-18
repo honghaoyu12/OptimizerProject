@@ -1028,6 +1028,17 @@ def run_training(
         # training); near 0 = the gradient direction is rotating (oscillating);
         # negative = the gradient has reversed direction (diverging or oscillating).
         "grad_cosine_sim": {n: [] for n in layer_names},
+        # Gradient conflict between adjacent Linear layers per epoch.
+        # For each adjacent pair (L_i, L_{i+1}) sharing hidden dim h_i:
+        #   sig_i   = mean_grad_i.mean(dim=1)  [shape h_i]  — grad at L_i outputs
+        #   sig_ip1 = mean_grad_ip1.mean(dim=0) [shape h_i] — grad at L_{i+1} inputs
+        # cosine_similarity ∈ [-1, 1].  Near 1 = layers are cooperating on the same
+        # hidden units; near -1 = gradient conflict (one layer pushes a hidden unit
+        # while the adjacent layer pulls it).  Empty dict for single-layer networks.
+        "grad_conflict": {
+            f"{layer_names[i]}↔{layer_names[i+1]}": []
+            for i in range(len(layer_names) - 1)
+        },
     }
 
     # ── EMA setup ──────────────────────────────────────────────────────────
@@ -1266,6 +1277,28 @@ def run_training(
                 cos_sim = float("nan")
             history["grad_cosine_sim"][n].append(cos_sim)
             _prev_mean_grad[n] = curr.detach().clone() if curr is not None else None
+
+        # Gradient conflict between adjacent layers.
+        # For each adjacent pair (L_i, L_{i+1}) that share hidden dimension h_i,
+        # compare the gradient signal along that shared axis:
+        #   sig_i   = G_i.mean(dim=1)   → shape (h_i,)  [gradient at L_i outputs]
+        #   sig_ip1 = G_ip1.mean(dim=0) → shape (h_i,)  [gradient at L_{i+1} inputs]
+        # A positive cosine similarity means both layers are updating the same
+        # hidden units; negative means conflicting pressures on the hidden layer.
+        grad_vec_list = [curr_grad_vecs.get(n) for n in layer_names]
+        for i in range(len(layer_names) - 1):
+            pair_key = f"{layer_names[i]}↔{layer_names[i+1]}"
+            g_i   = grad_vec_list[i]
+            g_ip1 = grad_vec_list[i + 1]
+            if g_i is not None and g_ip1 is not None:
+                sig_i   = g_i.mean(dim=1)    # (h_i,)
+                sig_ip1 = g_ip1.mean(dim=0)  # (h_i,)
+                conflict = torch.nn.functional.cosine_similarity(
+                    sig_i.unsqueeze(0), sig_ip1.unsqueeze(0)
+                ).item()
+            else:
+                conflict = float("nan")
+            history["grad_conflict"][pair_key].append(conflict)
 
         if scheduler is not None:
             scheduler.step()

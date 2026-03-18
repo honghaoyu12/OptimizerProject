@@ -426,3 +426,30 @@ def test_grad_cosine_sim_aggregated_for_multi_seed():
     assert "grad_cosine_sim" in hist
     for layer_vals in hist["grad_cosine_sim"].values():
         assert len(layer_vals) == 2
+
+
+def test_grad_conflict_present_single_seed():
+    """Single-seed run has 'grad_conflict' dict with per-pair lists."""
+    results = _run(epochs=2)
+    hist = next(iter(results.values()))
+    assert "grad_conflict" in hist
+    assert isinstance(hist["grad_conflict"], dict)
+    for pair_vals in hist["grad_conflict"].values():
+        assert len(pair_vals) == 2
+
+
+def test_grad_conflict_aggregated_for_multi_seed():
+    """num_seeds=2 → grad_conflict is aggregated (averaged) across seeds."""
+    results = _run(num_seeds=2, seed=0, epochs=2)
+    hist = next(iter(results.values()))
+    assert "grad_conflict" in hist
+    for pair_vals in hist["grad_conflict"].values():
+        assert len(pair_vals) == 2
+
+
+def test_lr_sensitivity_curves_runs_with_sweep():
+    """plot_lr_sensitivity_curves() runs without error on a 2-LR sweep."""
+    from visualizer import plot_lr_sensitivity_curves
+    results = _run(lrs=[0.1, 0.01], epochs=2)
+    # Should not raise even if only one optimizer
+    plot_lr_sensitivity_curves(results, save_path=None)

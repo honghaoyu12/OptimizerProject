@@ -9,7 +9,8 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
                         plot_efficiency_frontier, _pareto_frontier,
                         _compute_lr_sensitivity, plot_weight_distance, plot_hp_heatmap,
                         plot_grad_snr, plot_class_accuracy, plot_instability, plot_step_size,
-                        plot_sharpness, plot_grad_cosine_sim)
+                        plot_sharpness, plot_grad_cosine_sim,
+                        plot_grad_conflict, plot_lr_sensitivity_curves)
 
 
 # ---------------------------------------------------------------------------
@@ -1036,3 +1037,78 @@ class TestGradCosinePlot:
             optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
             save_path=None,
         )
+
+
+class TestGradConflictPlot:
+    """Tests for plot_grad_conflict()."""
+
+    def _make_results(self, opt_name="Adam"):
+        return {("MNIST", "MLP", opt_name): {
+            "grad_conflict": {
+                "L1(784→32)↔L2(32→10)": [0.8, 0.7, 0.6],
+            }
+        }}
+
+    def test_runs_without_error(self):
+        """plot_grad_conflict() runs without raising."""
+        plot_grad_conflict(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=None,
+        )
+
+    def test_saves_file(self, tmp_path):
+        """plot_grad_conflict() writes a file when save_path is set."""
+        out = tmp_path / "grad_conflict.png"
+        plot_grad_conflict(
+            self._make_results(),
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=str(out),
+        )
+        assert out.exists()
+
+    def test_empty_dict_no_error(self):
+        """Empty grad_conflict dict (single-layer net) renders without error."""
+        results = {("MNIST", "MLP", "Adam"): {"grad_conflict": {}}}
+        plot_grad_conflict(
+            results,
+            dataset_names=["MNIST"], model_names=["MLP"],
+            optimizer_names=["Adam"], opt_colors={"Adam": "#1f77b4"},
+            save_path=None,
+        )
+
+
+class TestLrSensitivityCurvesPlot:
+    """Tests for plot_lr_sensitivity_curves()."""
+
+    def _make_results(self):
+        """Two LR values for the same base optimizer."""
+        return {
+            ("MNIST", "MLP", "SGD lr=0.1"): {
+                "config_lr": 0.1,
+                "train_loss": [0.5, 0.4, 0.3],
+                "test_acc":   [0.8, 0.85, 0.88],
+            },
+            ("MNIST", "MLP", "SGD lr=0.01"): {
+                "config_lr": 0.01,
+                "train_loss": [0.7, 0.6, 0.55],
+                "test_acc":   [0.7, 0.75, 0.78],
+            },
+        }
+
+    def test_runs_without_error(self):
+        """plot_lr_sensitivity_curves() runs without raising."""
+        plot_lr_sensitivity_curves(self._make_results(), save_path=None)
+
+    def test_saves_file(self, tmp_path):
+        """plot_lr_sensitivity_curves() writes a file when save_path is set."""
+        out = tmp_path / "lr_curves.png"
+        plot_lr_sensitivity_curves(self._make_results(), save_path=str(out))
+        assert out.exists()
+
+    def test_no_config_lr_skips_gracefully(self):
+        """Results without config_lr keys produce no error."""
+        results = {("MNIST", "MLP", "Adam"): {"train_loss": [0.5], "test_acc": [0.8]}}
+        plot_lr_sensitivity_curves(results, save_path=None)
