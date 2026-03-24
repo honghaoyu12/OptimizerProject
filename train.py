@@ -1,10 +1,23 @@
 """Single-run trainer for image and tabular classification.
 
+This is the central training module.  It provides:
+  - OPTIMIZER_REGISTRY (20 entries) and SCHEDULER_REGISTRY (5 entries)
+  - Dataset loaders for MNIST, FashionMNIST, CIFAR-10/100, Tiny ImageNet
+    and 5 synthetic tabular datasets (see synthetic_datasets.py)
+  - build_model() — selects MLP, ResNet-18, or ViT from a dataset spec
+  - train_one_epoch() — single epoch: forward, backward, optimizer step,
+    gradient statistics accumulation, EMA update
+  - run_training() — full multi-epoch training loop: calls train_one_epoch,
+    evaluate, scheduler, early stopping, checkpointing, SWA, and collects
+    the full history dict
+  - A CLI (parse_args + main) for quick single-run experiments
+
 Supports datasets  : mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet
                      + 5 synthetic tabular datasets (illcond, sparse, noisy_grad,
                      manifold, saddle)
 Supports models    : mlp | resnet18 | vit
 Supports optimizers: 20 choices — see OPTIMIZER_REGISTRY below for the full list.
+Supports schedulers: none | cosine | step | warmup_cosine | cosine_wr
 
 Quickstart
 ----------
@@ -12,6 +25,14 @@ Quickstart
     python train.py --optimizer sgd --lr 0.01        # SGD on MNIST
     python train.py --dataset cifar10 --model resnet18 --scheduler cosine
     python train.py --ema-decay 0.999 --swa-start 5 --num-epochs 10
+
+Module-level singletons that other modules import
+--------------------------------------------------
+    OPTIMIZER_REGISTRY  — {name: lambda(params, lr, wd) -> Optimizer}
+    SCHEDULER_REGISTRY  — {name: lambda(opt, epochs, warmup) -> Scheduler}
+    DATASET_INFO        — {name: {in_channels, input_size, num_classes, ...}}
+    _CONV_THRESHOLDS    — [0.50, 0.75, 0.90, 0.95, 0.99]
+    set_seed()          — fixes all random sources for reproducible runs
 
 To add a custom optimizer
 -------------------------
@@ -42,6 +63,10 @@ from lr_finder import LRFinder
 # ---------------------------------------------------------------------------
 # Optimizer registry
 # ---------------------------------------------------------------------------
+# Maps a short string name to a factory lambda: (params, lr, wd) -> Optimizer.
+# The lambda always receives wd=0.0 because make_param_groups() already sets
+# per-group weight_decay; the factory just forwards it to the optimizer.
+#
 # To plug in your own optimizer:
 #   1. Implement it in optimizers/<your_file>.py (subclass BaseOptimizer).
 #   2. Import it here.
@@ -51,10 +76,14 @@ from lr_finder import LRFinder
 import numpy as np
 
 from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
+# Custom re-implementations of PyTorch built-in optimizers
+from optimizers import Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop
 
 # Optimizers that call loss.backward(create_graph=True) inside their own step()
 # to estimate Hessian-vector products.  GradScaler's loss scaling corrupts the
-# second-order gradient graph, so AMP must be disabled when these are in use.
+# second-order gradient graph (the scaled loss has a different Hessian from the
+# original), so AMP must be disabled automatically when these are in use.
+# train_one_epoch() checks isinstance(optimizer, _AMP_INCOMPATIBLE) at runtime.
 _AMP_INCOMPATIBLE = (Sophia, AdaHessian)
 
 # Accuracy thresholds used for the convergence profile.  For each threshold T
@@ -83,14 +112,14 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 OPTIMIZER_REGISTRY: dict = {
-    # PyTorch built-ins
-    "adam":        lambda p, lr, wd: torch.optim.Adam(p, lr=lr, weight_decay=wd),
-    "adamw":       lambda p, lr, wd: torch.optim.AdamW(p, lr=lr, weight_decay=wd),
-    "nadam":       lambda p, lr, wd: torch.optim.NAdam(p, lr=lr, weight_decay=wd),
-    "radam":       lambda p, lr, wd: torch.optim.RAdam(p, lr=lr, weight_decay=wd),
-    "adagrad":     lambda p, lr, wd: torch.optim.Adagrad(p, lr=lr, weight_decay=wd),
-    "sgd":         lambda p, lr, wd: torch.optim.SGD(p, lr=lr, momentum=0.9, weight_decay=wd),
-    "rmsprop":     lambda p, lr, wd: torch.optim.RMSprop(p, lr=lr, weight_decay=wd),
+    # Custom re-implementations of PyTorch built-ins (same algorithm, pure Python)
+    "adam":        lambda p, lr, wd: Adam(p, lr=lr, weight_decay=wd),
+    "adamw":       lambda p, lr, wd: AdamW(p, lr=lr, weight_decay=wd),
+    "nadam":       lambda p, lr, wd: NAdam(p, lr=lr, weight_decay=wd),
+    "radam":       lambda p, lr, wd: RAdam(p, lr=lr, weight_decay=wd),
+    "adagrad":     lambda p, lr, wd: Adagrad(p, lr=lr, weight_decay=wd),
+    "sgd":         lambda p, lr, wd: SGDMomentum(p, lr=lr, weight_decay=wd),
+    "rmsprop":     lambda p, lr, wd: RMSprop(p, lr=lr, weight_decay=wd),
     # Custom implementations
     "vanilla_sgd": lambda p, lr, wd: VanillaSGD(p, lr=lr, weight_decay=wd),
     "lion":        lambda p, lr, wd: Lion(p, lr=lr, weight_decay=wd),
@@ -112,8 +141,18 @@ OPTIMIZER_REGISTRY: dict = {
 # ---------------------------------------------------------------------------
 # Scheduler registry
 # ---------------------------------------------------------------------------
-
-SCHEDULER_REGISTRY: dict = {
+# Maps scheduler name to a factory: (optimizer, total_epochs, warmup_epochs)
+# → LR scheduler (or None for "none").  Each factory is called once per run.
+#
+# Schedules available:
+#   none         — constant LR throughout training
+#   cosine       — CosineAnnealingLR: LR decays from lr to 0 over total epochs
+#   step         — StepLR: multiply by 0.1 every epochs//3 epochs (3 drops)
+#   warmup_cosine— linear warmup for warmup_epochs, then cosine decay
+#   cosine_wr    — CosineAnnealingWarmRestarts: ~3 restarts (T_0=epochs//3)
+#                  Particularly effective with SGD (see SGDR paper)
+# ---------------------------------------------------------------------------
+SCHEDULER_REGISTRY = {
     "none": lambda opt, epochs, warmup: None,
     "cosine": lambda opt, epochs, warmup: torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=epochs, eta_min=0.0
@@ -142,7 +181,31 @@ SCHEDULER_REGISTRY: dict = {
 
 
 class EarlyStopping:
-    """Monitors val loss; signals when to stop and saves the best model state."""
+    """Early stopping monitor: halts training when val loss stops improving.
+
+    Patience is the number of consecutive epochs without improvement before
+    stopping.  patience=0 (default) disables early stopping entirely.
+
+    When stopping fires, the best model weights (at the epoch with lowest val
+    loss) are saved via state_dict() and later restored via restore().  This
+    means the final model is the *best checkpoint*, not the last one.
+
+    Typical use
+    -----------
+    es = EarlyStopping(patience=10, min_delta=1e-4)
+    for epoch in ...:
+        train(...)
+        val_loss = evaluate(...)
+        if es.step(val_loss, model):
+            break
+    es.restore(model, device)   # load best weights
+
+    Parameters
+    ----------
+    patience  : consecutive non-improving epochs before stopping (0 = off)
+    min_delta : minimum improvement in val loss to reset the counter.
+                Set to e.g. 1e-4 to ignore tiny improvements.
+    """
     def __init__(self, patience: int = 0, min_delta: float = 0.0):
         self.patience = patience
         self.min_delta = min_delta
@@ -155,7 +218,16 @@ class EarlyStopping:
         return self.patience > 0
 
     def step(self, val_loss: float, model: nn.Module) -> bool:
-        """Update state. Returns True if training should stop."""
+        """Update state. Returns True if training should stop.
+
+        Logic:
+          - If val_loss improved by > min_delta: reset counter, save weights.
+          - Otherwise: increment counter.
+          - If counter >= patience: return True (stop).
+
+        The best state is saved to CPU to avoid consuming GPU memory for
+        potentially many consecutive checkpoints.
+        """
         if not self.enabled:
             return False
         if val_loss < self.best_loss - self.min_delta:
@@ -172,7 +244,12 @@ class EarlyStopping:
             model.load_state_dict({k: v.to(device) for k, v in self.best_state.items()})
 
 
-# Optimizer state keys to track (mean abs value per linear layer per epoch)
+# Optimizer state keys to track (mean abs value per linear layer per epoch).
+# These are the keys that Adam-family optimizers store in their per-param state
+# dicts.  We read them after each epoch to track how the internal state evolves.
+# "exp_avg"    — first moment (gradient EMA); measures the average gradient direction
+# "exp_avg_sq" — second moment (squared gradient EMA); measures gradient scale
+# "hessian"    — diagonal Hessian estimate (Sophia, AdaHessian)
 _OPT_STATE_KEYS = ("exp_avg_sq", "exp_avg", "hessian")
 
 
@@ -248,9 +325,22 @@ def save_checkpoint(
 def make_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
     """Split parameters into decay / no-decay groups.
 
-    1-D parameters (biases, LayerNorm and BatchNorm weights/biases) are
-    excluded from weight decay. All other parameters (weight matrices,
-    conv filters, embeddings) are placed in the decay group.
+    Why distinguish 1-D from 2-D+ parameters?
+    In transformers and MLPs, bias terms and normalisation layer scales/biases
+    are 1-D tensors.  Applying weight decay to them has been shown to be
+    counter-productive — they do not benefit from the L2 regularisation that
+    prevents large weight matrices from overfitting.  This is the same split
+    used by AdamW (Loshchilov & Hutter 2019) and GPT-2/3 training recipes.
+
+    The returned list is passed directly to any Optimizer constructor:
+        optimizer = Adam(make_param_groups(model, wd), lr=lr)
+    The optimizer then uses the per-group weight_decay values rather than
+    a single global value.
+
+    1-D parameters (biases, LayerNorm and BatchNorm weights/biases):
+        → weight_decay = 0.0
+    All other parameters (weight matrices, conv filters, embeddings ndim ≥ 2):
+        → weight_decay = weight_decay (caller-specified)
     """
     decay, no_decay = [], []
     for p in model.parameters():
@@ -297,8 +387,16 @@ def build_optimizer(name: str, model: nn.Module, lr: float, weight_decay: float 
 # ---------------------------------------------------------------------------
 # Dataset info (exported for benchmark.py)
 # ---------------------------------------------------------------------------
-
-DATASET_INFO: dict = {
+# Maps dataset name → metadata dict.  All values are consumed by build_model()
+# and get_dataloaders().
+#
+# Keys:
+#   in_channels  — number of image channels (1 = grayscale, 3 = RGB)
+#   input_size   — flattened feature dimension (C × H × W) for MLP
+#   num_classes  — number of output classes
+#   tabular      — True for synthetic datasets (use SYNTHETIC_LOADERS, MLP only)
+# ---------------------------------------------------------------------------
+DATASET_INFO = {
     # Image datasets
     "mnist":          {"in_channels": 1, "input_size": 784,   "num_classes": 10},
     "fashion_mnist":  {"in_channels": 1, "input_size": 784,   "num_classes": 10},
@@ -317,6 +415,11 @@ DATASET_INFO: dict = {
 # Data
 # ---------------------------------------------------------------------------
 
+# Per-dataset normalisation statistics (channel means, channel stds).
+# Pre-computed on the full training set; applied by transforms.Normalize().
+# NOTE: these are the standard values widely reported in the literature and
+# used by torchvision's example scripts — do not change them without
+# recomputing statistics on the actual downloaded dataset.
 _DATASET_STATS = {
     "mnist":         ((0.1307,), (0.3081,)),
     "fashion_mnist": ((0.2860,), (0.3530,)),
@@ -496,7 +599,17 @@ def build_model(model_name: str, dataset_info: dict, hidden_sizes: list[int]) ->
 # ---------------------------------------------------------------------------
 
 def linear_layer_names(model: nn.Module) -> list[str]:
-    """Return short display names for each Linear layer's weight tensor."""
+    """Return short human-readable names for each nn.Linear layer's weight.
+
+    Names take the form "L{idx}({in_features}→{out_features})", e.g.
+    "L1(784→256)", "L2(256→128)", "L3(128→10)" for a 2-hidden-layer MLP.
+
+    These names are used as dict keys in all history/gradient/weight dicts
+    (grad_norms, weight_norms, grad_snr, step_size, grad_cosine_sim, etc.)
+    so the same call must be made on the same model every time to guarantee
+    consistent ordering.  model.named_modules() yields layers in the order
+    they were added, so the ordering is stable.
+    """
     names = []
     idx = 1
     for name, module in model.named_modules():
@@ -508,7 +621,13 @@ def linear_layer_names(model: nn.Module) -> list[str]:
 
 
 def weight_norms(model: nn.Module, layer_names: list[str]) -> dict[str, float]:
-    """L2 norm of each Linear layer's weight matrix."""
+    """L2 norm of each Linear layer's weight matrix.
+
+    The weight norm is a coarse measure of how large the parameters are.
+    Unusually large norms suggest the optimizer is making very large updates
+    or that weight decay is insufficient.  Unusually small norms suggest the
+    optimizer is shrinking weights aggressively (over-regularised).
+    """
     norms = {}
     idx = 0
     for module in model.modules():

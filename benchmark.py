@@ -1,4 +1,4 @@
-"""Interactive optimizer benchmark.
+"""Interactive optimizer benchmark — compare multiple optimizers in one run.
 
 Run with:
     python benchmark.py
@@ -48,6 +48,8 @@ from logger import TrainingLogger
 from lr_finder import LRFinder
 from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
+# Custom re-implementations of PyTorch built-in optimizers
+from optimizers import Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop
 from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
@@ -63,7 +65,20 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
 # ---------------------------------------------------------------------------
 # Registries
 # ---------------------------------------------------------------------------
-
+# Each registry is an OrderedDict so that items stay in insertion order when
+# displayed in the interactive menus (numbered lists).
+#
+# DATASET_REGISTRY: human-readable display name -> internal dataset key
+#   The internal key must match a key in train.DATASET_INFO.
+#
+# MODEL_REGISTRY: display name -> {factory, description}
+#   factory(info, hidden_sizes) -> nn.Module
+#
+# OPTIMIZER_REGISTRY: display name -> {factory, default_lr, color}
+#   factory(params, lr, weight_decay) -> torch.optim.Optimizer
+#   default_lr: used when lrs=None (no explicit LR sweep)
+#   color:      matplotlib hex color for plots (hand-picked for distinguishability)
+# ---------------------------------------------------------------------------
 DATASET_REGISTRY: OrderedDict = OrderedDict([
     ("MNIST",                     "mnist"),
     ("Fashion MNIST",             "fashion_mnist"),
@@ -107,37 +122,44 @@ MODEL_REGISTRY: OrderedDict = OrderedDict([
 # Each entry: factory function + sensible default LR + display colour
 OPTIMIZER_REGISTRY: OrderedDict = OrderedDict([
     ("SGD",          {
-        "factory":    lambda p, lr, wd: torch.optim.SGD(p, lr=lr, weight_decay=wd),
+        # Custom VanillaSGD equivalent — plain SGD without momentum
+        "factory":    lambda p, lr, wd: SGDMomentum(p, lr=lr, momentum=0.0, nesterov=False, weight_decay=wd),
         "default_lr": 0.01,
         "color":      "#e41a1c",   # red
     }),
     ("SGD+Momentum", {
-        "factory":    lambda p, lr, wd: torch.optim.SGD(p, lr=lr, momentum=0.9, weight_decay=wd),
+        # Custom SGDMomentum with Nesterov acceleration (matches torch.optim.SGD momentum=0.9)
+        "factory":    lambda p, lr, wd: SGDMomentum(p, lr=lr, momentum=0.9, weight_decay=wd),
         "default_lr": 0.01,
         "color":      "#ff7f00",   # orange
     }),
     ("Adam",         {
-        "factory":    lambda p, lr, wd: torch.optim.Adam(p, lr=lr, weight_decay=wd),
+        # Custom Adam — decoupled bias-corrected adaptive moment estimation
+        "factory":    lambda p, lr, wd: Adam(p, lr=lr, weight_decay=wd),
         "default_lr": 0.001,
         "color":      "#377eb8",   # blue
     }),
     ("Adagrad",      {
-        "factory":    lambda p, lr, wd: torch.optim.Adagrad(p, lr=lr, weight_decay=wd),
+        # Custom Adagrad — cumulative squared gradient scaling
+        "factory":    lambda p, lr, wd: Adagrad(p, lr=lr, weight_decay=wd),
         "default_lr": 0.01,
         "color":      "#4daf4a",   # green
     }),
     ("AdamW",        {
-        "factory":    lambda p, lr, wd: torch.optim.AdamW(p, lr=lr, weight_decay=wd),
+        # Custom AdamW — Adam with decoupled (not coupled) weight decay
+        "factory":    lambda p, lr, wd: AdamW(p, lr=lr, weight_decay=wd),
         "default_lr": 0.001,
         "color":      "#984ea3",   # purple
     }),
     ("NAdam",        {
-        "factory":    lambda p, lr, wd: torch.optim.NAdam(p, lr=lr, weight_decay=wd),
+        # Custom NAdam — Adam with Nesterov momentum lookahead
+        "factory":    lambda p, lr, wd: NAdam(p, lr=lr, weight_decay=wd),
         "default_lr": 0.002,
         "color":      "#a65628",   # brown
     }),
     ("RAdam",        {
-        "factory":    lambda p, lr, wd: torch.optim.RAdam(p, lr=lr, weight_decay=wd),
+        # Custom RAdam — Rectified Adam with automatic warm-up via SMA variance check
+        "factory":    lambda p, lr, wd: RAdam(p, lr=lr, weight_decay=wd),
         "default_lr": 0.001,
         "color":      "#f781bf",   # pink
     }),
@@ -215,7 +237,22 @@ OPTIMIZER_REGISTRY: OrderedDict = OrderedDict([
 # ---------------------------------------------------------------------------
 
 def prompt_multiselect(title: str, options: list[str], descriptions: list[str] | None = None) -> list[str]:
-    """Print a numbered menu and return the user-selected subset (multi-select)."""
+    """Print a numbered menu and return the user-selected subset (multi-select).
+
+    The user types comma-separated indices (e.g. "1,3,5") or "all" to
+    select everything.  Duplicate indices are silently de-duplicated.
+    Loops until valid input is received.
+
+    Parameters
+    ----------
+    title        : section header shown above the menu
+    options      : list of option display strings
+    descriptions : optional per-option description strings (shown in parens)
+
+    Returns
+    -------
+    list[str] — selected option strings, in the order the user entered them
+    """
     width = 56
     print(f"\n{'─' * width}")
     print(f"  {title}")
