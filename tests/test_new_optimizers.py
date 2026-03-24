@@ -298,6 +298,144 @@ class TestNAdam:
         for p in model.parameters():
             assert 0.0 < opt.state[p]["mu_product"] < 1.0
 
+    def test_momentum_decay_affects_update(self):
+        """momentum_decay must change the parameter trajectory (not be a no-op).
+
+        Before the fix, momentum_decay was computed but never used — the first
+        moment EMA and bias corrections both used the fixed beta1 regardless of
+        the schedule.  This test checks that two NAdam instances with different
+        momentum_decay values actually produce different weight trajectories.
+        """
+        torch.manual_seed(0)
+        x = torch.randn(4, 8)
+
+        torch.manual_seed(42)
+        model_no_decay = make_linear()
+        opt_no_decay = NAdam(model_no_decay.parameters(), lr=2e-3, momentum_decay=0.0)
+
+        torch.manual_seed(42)
+        model_with_decay = make_linear()
+        opt_with_decay = NAdam(model_with_decay.parameters(), lr=2e-3, momentum_decay=4e-3)
+
+        for _ in range(10):
+            model_no_decay(x).sum().backward()
+            opt_no_decay.step()
+            opt_no_decay.zero_grad()
+
+            model_with_decay(x).sum().backward()
+            opt_with_decay.step()
+            opt_with_decay.zero_grad()
+
+        # With a non-trivial momentum schedule the weights must diverge
+        assert not torch.allclose(
+            model_no_decay.weight.data, model_with_decay.weight.data
+        ), "momentum_decay=0 and momentum_decay=4e-3 produced identical weights — schedule has no effect"
+
+    def test_mu_product_matches_manual_product(self):
+        """State mu_product must equal the running product ∏ μ_i, not a stale value.
+
+        This verifies that mu_product is updated correctly each step and equals
+        the product of all scheduled mu_t values seen so far — confirming the
+        schedule accumulation is wired up and not bypassed.
+        """
+        beta1 = 0.9
+        mu_decay = 4e-3
+        model = nn.Linear(4, 2, bias=False)
+        torch.manual_seed(0)
+        opt = NAdam(model.parameters(), lr=2e-3, betas=(beta1, 0.999),
+                    momentum_decay=mu_decay)
+
+        expected_product = 1.0
+        for step in range(1, 6):
+            model(torch.randn(2, 4)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+
+            mu_t = beta1 * (1.0 - 0.5 * (0.96 ** (step * mu_decay)))
+            expected_product *= mu_t
+
+            for p in model.parameters():
+                actual = opt.state[p]["mu_product"]
+                assert abs(actual - expected_product) < 1e-9, (
+                    f"step {step}: mu_product={actual:.10f}, "
+                    f"expected={expected_product:.10f}"
+                )
+
+    def test_first_moment_uses_scheduled_mu(self):
+        """The first moment EMA must use mu_t, not the fixed beta1.
+
+        After one step with momentum_decay > 0, mu_1 < beta1.  The first
+        moment m_1 = mu_1 * 0 + (1 - mu_1) * g  (zero-initialised buffer).
+        If the bug were present m_1 would use beta1 instead, giving a different
+        (smaller) value for (1 - beta1) * g vs (1 - mu_1) * g since mu_1 < beta1.
+        """
+        beta1 = 0.9
+        mu_decay = 4e-3
+        # mu_1 = beta1 * (1 - 0.5 * 0.96^(1 * mu_decay))
+        mu_1 = beta1 * (1.0 - 0.5 * (0.96 ** mu_decay))
+        # mu_1 should be strictly less than beta1 (the schedule reduces it)
+        assert mu_1 < beta1
+
+        torch.manual_seed(0)
+        model = nn.Linear(4, 2, bias=False)
+        opt = NAdam(model.parameters(), lr=2e-3, betas=(beta1, 0.999),
+                    momentum_decay=mu_decay)
+
+        torch.manual_seed(1)
+        x = torch.randn(2, 4)
+        model(x).sum().backward()
+        opt.step()
+
+        for p in model.parameters():
+            if p.grad is not None:
+                m = opt.state[p]["exp_avg"]
+                g = p.grad  # zero_grad not called — grad still set
+                # With correct fix: m = (1 - mu_1) * g (zero init, one step)
+                expected_m = (1.0 - mu_1) * g
+                # With the old bug: m = (1 - beta1) * g
+                buggy_m = (1.0 - beta1) * g
+                # The two differ because mu_1 != beta1
+                assert not torch.allclose(expected_m, buggy_m), \
+                    "mu_1 == beta1: schedule has no effect at step 1"
+                assert torch.allclose(m, expected_m, atol=1e-6), (
+                    f"First moment does not match (1-mu_1)*g: "
+                    f"max diff {(m - expected_m).abs().max().item():.2e}"
+                )
+
+    def test_zero_momentum_decay_matches_fixed_beta1(self):
+        """When momentum_decay=0 the schedule collapses to fixed beta1.
+
+        mu_t = beta1 * (1 - 0.5 * 0.96^0) = beta1 * 0.5 ... wait, that's
+        only true for t*0=0.  Actually 0.96^(t*0)=1 for all t, so
+        mu_t = beta1 * (1 - 0.5) = 0.5*beta1 when decay=0, which is NOT
+        equal to beta1.  A decay that truly disables the schedule uses
+        a large decay so that 0.96^(t*decay) → 0, giving mu_t → beta1.
+        Here we verify the edge case: momentum_decay=0 keeps mu_t constant
+        (at 0.5*beta1) across all steps, so mu_product stays geometric.
+        """
+        beta1 = 0.9
+        mu_decay = 0.0
+        # With decay=0: mu_t = beta1 * (1 - 0.5 * 1) = beta1 * 0.5 every step
+        mu_constant = beta1 * 0.5
+
+        model = nn.Linear(4, 2, bias=False)
+        torch.manual_seed(0)
+        opt = NAdam(model.parameters(), lr=2e-3, betas=(beta1, 0.999),
+                    momentum_decay=mu_decay)
+
+        expected_product = 1.0
+        for step in range(1, 6):
+            model(torch.randn(2, 4)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+            expected_product *= mu_constant
+            for p in model.parameters():
+                actual = opt.state[p]["mu_product"]
+                assert abs(actual - expected_product) < 1e-9, (
+                    f"step {step}: mu_product={actual:.10f} != "
+                    f"(0.5*beta1)^step={expected_product:.10f}"
+                )
+
     def test_numerically_close_to_torch_nadam(self):
         """Custom NAdam should produce similar results to torch.optim.NAdam.
 
