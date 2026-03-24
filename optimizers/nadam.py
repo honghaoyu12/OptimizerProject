@@ -18,19 +18,21 @@ one step ahead along the momentum direction.
 
 Algorithm
 ---------
-For each parameter p with gradient g at step t:
+For each parameter p with gradient g at step t (with momentum schedule):
 
-  1. First moment:   m_t  = β₁ · m_{t-1} + (1 − β₁) · g_t
-  2. Second moment:  v_t  = β₂ · v_{t-1} + (1 − β₂) · g_t²
+  μ_t = β₁ · (1 − 0.5 · 0.96^{t·decay})   (scheduled per-step coefficient)
+  Π_t = ∏_{i=1}^{t} μ_i                    (running product; replaces β₁^t)
+
+  1. First moment:   m_t  = μ_t · m_{t-1} + (1 − μ_t) · g_t
+  2. Second moment:  v_t  = β₂ · v_{t-1}  + (1 − β₂) · g_t²
   3. Bias-correct:   v̂_t = v_t / (1 − β₂^t)
-  4. Nesterov update direction (lookahead first moment):
-       ĝ_t = β₁ · m_t / (1 − β₁^{t+1}) + (1 − β₁) · g_t / (1 − β₁^t)
+  4. Nesterov update direction (with scheduled bias correction):
+       ĝ_t = μ_{t+1} · m_t / Π_{t+1} + (1 − μ_t) · g_t / Π_t
   5. Parameter update:
        θ_t = θ_{t-1} − α · ĝ_t / (√v̂_t + ε)
 
-Step 4 is derived by noticing that in NAG, the update uses g_{t} evaluated at
-θ_{t-1} − α·β₁·m_{t-1}.  Substituting into Adam's update and simplifying
-gives this closed-form expression in terms of m_t and g_t.
+When momentum_decay=0 the schedule collapses to μ_t = β₁ and Π_t = β₁^t,
+recovering the standard NAdam formula without a momentum schedule.
 
 Practical tips
 --------------
@@ -124,22 +126,27 @@ class NAdam(BaseOptimizer):
                     g = g.add(p, alpha=wd)
 
                 # ── Momentum schedule ─────────────────────────────────────
-                # μ_t is a per-step effective β₁ that decays over time.
+                # μ_t is a per-step effective β₁ that decays over time,
+                # used instead of the fixed beta1 in the first moment update.
                 # The schedule (from Sutskever et al. / original NAdam paper):
                 #   μ_t = β₁ · (1 − 0.5 · 0.96^{t/250})
                 # This gradually reduces momentum, stabilising later training.
                 mu_t      = beta1 * (1.0 - 0.5 * (0.96 ** (t * mu_decay)))
-                # μ_{t+1}: the momentum at the NEXT step — needed for the
-                # Nesterov lookahead update direction.
+                # μ_{t+1}: the momentum at the NEXT step — used in the
+                # Nesterov bias-correction numerator (see step 4 below).
                 mu_t1     = beta1 * (1.0 - 0.5 * (0.96 ** ((t + 1) * mu_decay)))
 
-                # Running product of all μ values up to step t (and t+1)
+                # Running product ∏_{i=1}^{t} μ_i — replaces beta1^t in the
+                # standard Adam bias correction to correctly account for the
+                # per-step varying momentum coefficient.
                 mu_prod_t  = state["mu_product"] * mu_t
                 mu_prod_t1 = mu_prod_t * mu_t1
                 state["mu_product"] = mu_prod_t   # save for next iteration
 
                 # ── Steps 1 & 2: Moment updates ───────────────────────────
-                m.mul_(beta1).add_(g, alpha=1.0 - beta1)
+                # Use the scheduled mu_t (not fixed beta1) for the first moment
+                # so the momentum actually decays over training as designed.
+                m.mul_(mu_t).add_(g, alpha=1.0 - mu_t)
                 v.mul_(beta2).addcmul_(g, g, value=1.0 - beta2)
 
                 # ── Step 3: Second moment bias correction ─────────────────
@@ -147,17 +154,15 @@ class NAdam(BaseOptimizer):
                 v_hat      = v / bias_corr2   # unbiased variance estimate
 
                 # ── Step 4: Nesterov update direction ─────────────────────
-                # Combines lookahead first moment (m_t biased toward t+1)
-                # with the current raw gradient scaled by its own bias term.
-                # This is mathematically equivalent to evaluating the gradient
-                # one momentum step ahead.
-                bias_corr1      = 1.0 - beta1 ** t    # bias correction for step t
-                bias_corr1_next = 1.0 - beta1 ** (t + 1)  # bias correction for t+1
-
+                # Use the cumulative mu products for bias corrections instead
+                # of beta1^t, matching the paper's scheduled formulation.
+                # mu_prod_t  = ∏_{i=1}^{t} μ_i  (includes current step)
+                # mu_prod_t1 = ∏_{i=1}^{t+1} μ_i (includes next step)
+                #
                 # Nesterov gradient direction:
-                #   ĝ = (β₁ · m_t / (1−β₁^{t+1})) + ((1−β₁) · g / (1−β₁^t))
-                nesterov_grad = m.mul(beta1 / bias_corr1_next).add(
-                    g, alpha=(1.0 - beta1) / bias_corr1
+                #   ĝ = (μ_{t+1} · m_t / ∏_{i≤t+1} μ_i) + ((1−μ_t) · g / ∏_{i≤t} μ_i)
+                nesterov_grad = m.mul(mu_t1 / mu_prod_t1).add(
+                    g, alpha=(1.0 - mu_t) / mu_prod_t
                 )
 
                 # ── Step 5: Parameter update ──────────────────────────────
