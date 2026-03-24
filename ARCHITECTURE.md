@@ -140,6 +140,13 @@ optimizers/
 ├── base.py        ← BaseOptimizer extends torch.optim.Optimizer
 │                    subclasses only need to implement step()
 ├── sgd.py         ← VanillaSGD — plain SGD; reference baseline
+├── adam.py        ← Adam — bias-corrected adaptive moments (custom, replaces torch.optim.Adam)
+├── adamw.py       ← AdamW — Adam with decoupled weight decay (custom, replaces torch.optim.AdamW)
+├── nadam.py       ← NAdam — Adam + Nesterov lookahead with momentum schedule (custom)
+├── radam.py       ← RAdam — Rectified Adam; automatic warm-up via SMA variance check (custom)
+├── adagrad.py     ← Adagrad — cumulative squared gradient scaling (custom, replaces torch.optim.Adagrad)
+├── sgd_momentum.py← SGDMomentum — velocity buffer + optional Nesterov (custom, replaces torch.optim.SGD)
+├── rmsprop.py     ← RMSprop — EMA squared gradient; centred + momentum variants (custom)
 ├── lion.py        ← Lion (Chen et al. 2023); sign-based momentum updates
 ├── lamb.py        ← LAMB; per-layer trust ratio, scales step by ‖θ‖/‖u‖
 ├── shampoo.py     ← Shampoo; Kronecker-factored preconditioners (CPU eigendecomp)
@@ -154,8 +161,7 @@ optimizers/
 └── schedule_free.py ← ScheduleFreeAdamW; Polyak averaging replaces LR schedule
 ```
 
-All are registered in `train.py`'s `OPTIMIZER_REGISTRY` (20 entries including the standard
-PyTorch ones) and available in `benchmark.py`'s registry (19 entries with display colors).
+All are registered in `train.py`'s `OPTIMIZER_REGISTRY` (20 entries — all custom implementations) and available in `benchmark.py`'s registry (19 entries with display colors). No optimizer delegates to `torch.optim.*` any longer.
 
 **Contribution to the goal:** The primary subject under study. Adding a new optimizer means
 implementing one file extending `BaseOptimizer`, importing it in `train.py`, and adding one
@@ -423,18 +429,20 @@ All diagnostics, logging, visualization, and tests work automatically.
 
 | File | Tests | What is verified |
 |---|---|---|
-| `test_train.py` | 73 | DATASET_INFO, build_model (incl. tabular guard), train_one_epoch, run_training, EarlyStopping, gradient clipping, scheduler integration, weight decay (make_param_groups) |
-| `test_optimizers.py` | 55 | All 20 optimizers: factory, one-step finite weights, state dict, optimizer-specific state and behaviour |
-| `test_synthetic.py` | 52 | SYNTHETIC_LOADERS registry, tensor shapes, label ranges, NaN checks, standardization correctness, reproducibility |
-| `test_logger.py` | 30 | log_run(), close(), CSV/JSON schema, multi-run aggregation, edge cases |
-| `test_models.py` | 17 | MLP hidden_sizes variants, ResNet18 forward, ViT forward, param counts, device transfer |
-| `test_metrics.py` | 9 | Hutchinson trace (n_samples, finite result, NaN on failure), sharpness (epsilon, directions, weight restoration) |
+| `test_train.py` | 126 | DATASET_INFO, build_model, train_one_epoch, run_training, EarlyStopping, gradient clipping, AMP, compile, checkpoint resume, scheduler integration, weight decay, gradient SNR, ECE, per-class accuracy, instability, step size, sharpness, grad cosine sim, grad conflict |
+| `test_new_optimizers.py` | 54 | Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop: state init, step counter, finite weights, weight decay, optimizer-specific invariants, numerical agreement with torch.optim |
+| `test_optimizers.py` | 49 | VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW: factory, one-step finite weights, state dict, optimizer-specific state |
+| `test_visualizer.py` | 86 | All plot functions including sharpness, grad cosine sim, grad conflict, LR sensitivity curves |
+| `test_logger.py` | 32 | log_run(), close(), CSV/JSON schema, multi-run aggregation |
+| `test_benchmark.py` | 44 | run_benchmark() LR/WD sweep, multi-seed aggregation, sharpness, grad_cosine_sim, grad_conflict, lr_sensitivity_curves |
+| `test_report.py` | 31 | generate_report(): content, sections, ± std, EMA/SWA/ECE columns |
+| `test_synthetic.py` | 16 | SYNTHETIC_LOADERS registry, tensor shapes, label ranges, NaN checks |
+| `test_models.py` | 17 | MLP, ResNet18, ViT: forward pass, param counts, device transfer |
+| `test_metrics.py` | 9 | Hutchinson trace, sharpness (epsilon, directions, weight restoration) |
 | `test_plot_from_logs.py` | 9 | load_session(), reconstruct_results(), series naming, weight-decay sweeps |
-| `test_lr_finder.py` | 7 | history keys/length, monotone LR, state restoration (weights + LR), suggestion range, AdaHessian path |
+| `test_lr_finder.py` | 7 | history keys/length, monotone LR, state restoration, suggestion range |
 | `test_checkpoints.py` | 5 | save_checkpoint(), load, config keys, best vs final checkpoint logic |
-| `test_benchmark.py` | 9 | run_benchmark() LR sweep: per-optimizer defaults, single override, multi-value sweep, combined LR+WD suffixes; multi-seed: single result per combo, std keys added, no agg-std for num_seeds=1 |
-| `test_report.py` | 11 | generate_report(): returns string, file creation, content parity, all section headers, empty save_path, multi-optimizer rankings, ± std shown when test_acc_std present |
-| **Total** | **290** | |
+| **Total** | **564** | |
 
 ---
 

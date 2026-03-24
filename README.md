@@ -23,6 +23,13 @@ OptimizerProject/
 │   ├── __init__.py       # Exports all custom optimizers
 │   ├── base.py           # Abstract base class for custom optimizers
 │   ├── sgd.py            # VanillaSGD — minimal reference implementation
+│   ├── adam.py           # Adam — bias-corrected adaptive moments
+│   ├── adamw.py          # AdamW — Adam with decoupled weight decay
+│   ├── nadam.py          # NAdam — Adam + Nesterov momentum schedule
+│   ├── radam.py          # RAdam — Rectified Adam with automatic warm-up
+│   ├── adagrad.py        # Adagrad — cumulative squared gradient scaling
+│   ├── sgd_momentum.py   # SGDMomentum — SGD with velocity + optional Nesterov
+│   ├── rmsprop.py        # RMSprop — EMA squared gradient; centred + momentum variants
 │   ├── lion.py           # Lion — EvoLved Sign Momentum
 │   ├── lamb.py           # LAMB — Layer-wise Adaptive Moments
 │   ├── shampoo.py        # Shampoo — Kronecker-factored second-order
@@ -35,14 +42,21 @@ OptimizerProject/
 │   ├── sophia.py         # Sophia — Hutchinson Hessian clipping
 │   ├── prodigy.py        # Prodigy — parameter-free auto-scaling step size
 │   └── schedule_free.py  # ScheduleFreeAdamW — iterate averaging, no schedule needed
+│   ├── adabelief.py      # AdaBelief — belief-adjusted adaptive step sizes
+│   ├── signsgd.py        # SignSGD — pure sign updates with optional momentum
+│   ├── adafactor.py      # AdaFactor — memory-efficient factored second moment
+│   ├── sophia.py         # Sophia — Hutchinson Hessian clipping
+│   ├── prodigy.py        # Prodigy — parameter-free auto-scaling step size
+│   └── schedule_free.py  # ScheduleFreeAdamW — iterate averaging, no schedule needed
 ├── tests/
 │   ├── __init__.py
 │   ├── test_models.py        # 17 tests for MLP, ResNet18, and ViT
-│   ├── test_optimizers.py    # 55 tests for all 20 optimizers
+│   ├── test_optimizers.py    # 49 tests for custom optimizers (Lion, LAMB, Shampoo, etc.)
+│   ├── test_new_optimizers.py# 54 tests for Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop
 │   ├── test_metrics.py       # 9 tests for Hessian trace and sharpness
-│   ├── test_train.py         # 77 tests for datasets, build_model, training loop, schedulers, early stopping, grad clipping, weight decay
-│   ├── test_synthetic.py     # 52 tests for the five synthetic datasets
-│   ├── test_logger.py        # 30 tests for TrainingLogger
+│   ├── test_train.py         # 126 tests for datasets, build_model, training loop, schedulers, early stopping, grad clipping, weight decay
+│   ├── test_synthetic.py     # 16 tests for the five synthetic datasets
+│   ├── test_logger.py        # 32 tests for TrainingLogger
 │   ├── test_checkpoints.py   # 5 tests for checkpoint save/restore
 │   ├── test_plot_from_logs.py# 9 tests for log-replay plotting
 │   ├── test_lr_finder.py     # 7 tests for LRFinder
@@ -546,11 +560,12 @@ Expected output: `379 passed` in a few seconds (all on CPU, no downloads needed)
 | File | Tests | What it covers |
 |---|---|---|
 | `tests/test_models.py` | 17 | MLP, ResNet18, ViT forward passes; output shapes; patch size assertion |
-| `tests/test_optimizers.py` | 55 | Registry completeness; finite weights after one step for all 20 optimizers; optimizer-specific state and behaviour |
+| `tests/test_new_optimizers.py` | 54 | Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop: state init, step counter, finite weights, weight decay, optimizer-specific invariants, numerical agreement with torch.optim |
+| `tests/test_optimizers.py` | 49 | Registry completeness; finite weights after one step; optimizer-specific state for Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW |
 | `tests/test_metrics.py` | 9 | Hessian trace (type, finiteness, positivity, NaN on no-param model); sharpness (type, non-negativity, weight restoration, epsilon monotonicity) |
-| `tests/test_train.py` | 89 | `DATASET_INFO` metadata; `build_model` for all model×dataset combos; `train_one_epoch` return dict; schedulers (incl. cosine_wr); early stopping; gradient clipping; weight decay (`make_param_groups`); seed reproducibility; AMP: disabled/CPU-noop/auto-disabled for Sophia+AdaHessian; EMA weights; label smoothing; SWA |
-| `tests/test_synthetic.py` | 52 | Registry completeness; loader shapes; label validity; NaN checks; standardisation; reproducibility; dataset-specific properties |
-| `tests/test_logger.py` | 32 | `TrainingLogger` session creation; `log_run` file format incl. `learning_rate` column; `close` summary; edge cases |
+| `tests/test_train.py` | 126 | `DATASET_INFO` metadata; `build_model`; `train_one_epoch` return dict; schedulers; early stopping; gradient clipping; weight decay; seed reproducibility; AMP; EMA; label smoothing; SWA; gradient SNR; ECE; per-class accuracy; instability; step size; sharpness; grad cosine sim; grad conflict |
+| `tests/test_synthetic.py` | 16 | Registry completeness; loader shapes; label validity; NaN checks |
+| `tests/test_logger.py` | 32 | `TrainingLogger` session creation; `log_run` file format; `close` summary; edge cases |
 | `tests/test_checkpoints.py` | 5 | Checkpoint save and restore for best and final model states |
 | `tests/test_plot_from_logs.py` | 9 | Log-replay plotting from saved session directories |
 | `tests/test_lr_finder.py` | 7 | History keys/shape; monotone LR schedule; weight/LR state restoration; suggestion range; AdaHessian compatibility |
@@ -630,13 +645,13 @@ Synthetic tabular datasets are MLP-only. ResNet-18 and ViT raise a `ValueError` 
 
 | Key (`--optimizer`) | Display name | Source | Default LR |
 |---|---|---|---|
-| `adam` | Adam | `torch.optim.Adam` | 1e-3 |
-| `adamw` | AdamW | `torch.optim.AdamW` | 1e-3 |
-| `nadam` | NAdam | `torch.optim.NAdam` | 2e-3 |
-| `radam` | RAdam | `torch.optim.RAdam` | 1e-3 |
-| `adagrad` | Adagrad | `torch.optim.Adagrad` | 1e-2 |
-| `sgd` | SGD+Momentum | `torch.optim.SGD(momentum=0.9)` | 1e-2 |
-| `rmsprop` | RMSprop | `torch.optim.RMSprop` | 1e-3 |
+| `adam` | Adam | `optimizers/adam.py` | 1e-3 |
+| `adamw` | AdamW | `optimizers/adamw.py` | 1e-3 |
+| `nadam` | NAdam | `optimizers/nadam.py` | 2e-3 |
+| `radam` | RAdam | `optimizers/radam.py` | 1e-3 |
+| `adagrad` | Adagrad | `optimizers/adagrad.py` | 1e-2 |
+| `sgd` | SGD+Momentum | `optimizers/sgd_momentum.py` | 1e-2 |
+| `rmsprop` | RMSprop | `optimizers/rmsprop.py` | 1e-3 |
 | `vanilla_sgd` | VanillaSGD | `optimizers/sgd.py` | 1e-2 |
 | `lion` | Lion | `optimizers/lion.py` | 1e-4 |
 | `lamb` | LAMB | `optimizers/lamb.py` | 1e-3 |

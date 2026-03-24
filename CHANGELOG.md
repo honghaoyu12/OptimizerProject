@@ -4,7 +4,53 @@ All notable changes to this project are documented here, in reverse-chronologica
 
 ---
 
-## Round 35 — Documentation Pass & Bug Fixes
+## Round 37 — Custom Re-implementations of PyTorch Built-in Optimizers + Tests
+
+### `optimizers/adam.py` (new)
+- `Adam`: full bias-corrected adaptive moment estimation. Coupled L2 weight decay (decay added to gradient before moment update, unlike AdamW). Uses `addcdiv_` for the in-place parameter update. Numerically matches `torch.optim.Adam` to ~1e-6 absolute tolerance.
+
+### `optimizers/adamw.py` (new)
+- `AdamW`: Adam with decoupled weight decay. Decay is applied directly to the parameter (`p.mul_(1 − α·λ)`) before the gradient update, bypassing the second-moment scaling. This is the key mathematical difference from Adam+L2. Numerically matches `torch.optim.AdamW` to ~1e-6.
+
+### `optimizers/nadam.py` (new)
+- `NAdam`: Adam with Nesterov momentum. Uses a per-step momentum schedule (μ_t = β₁·(1 − 0.5·0.96^{t·μ_decay})) and tracks the running product `mu_product = ∏ μ_t` for exact bias correction. Nesterov update direction combines the lookahead first moment with the current raw gradient scaled by its own bias correction factor.
+
+### `optimizers/radam.py` (new)
+- `RAdam`: Rectified Adam with automatic warm-up. Each step computes the approximate SMA length ρ_t = ρ_∞ − 2t·β₂^t/(1−β₂^t). When ρ_t > 5 (reliable second moment), applies the full adaptive update with a variance correction factor r_t. When ρ_t ≤ 5 (early steps), falls back to SGD+momentum — eliminating the need for a manual warmup schedule. Numerically matches `torch.optim.RAdam`.
+
+### `optimizers/adagrad.py` (new)
+- `Adagrad`: cumulative sum-of-squares adaptive gradient. State key `"sum"` holds G_t = Σ g_i² (monotonically non-decreasing). Supports `initial_accumulator_value` (pre-fills G to dampen first-step updates) and `lr_decay` (effective LR = α / (1 + (t−1)·lr_decay)). Numerically matches `torch.optim.Adagrad`.
+
+### `optimizers/sgd_momentum.py` (new)
+- `SGDMomentum`: SGD with configurable momentum, Nesterov acceleration, and dampening. Velocity buffer initialised from the first gradient (not zero). Raises `ValueError` if `nesterov=True` and `dampening != 0`. Nesterov path: `g = g + μ·v` (one lookahead step). Standard path: `g = v`. Numerically matches `torch.optim.SGD` with `nesterov=True`.
+
+### `optimizers/rmsprop.py` (new)
+- `RMSprop`: EMA of squared gradients (fixes Adagrad's shrinking LR). Supports `centered=True` (normalises by variance = E[g²] − E[g]² instead of uncentred second moment) and `momentum > 0` (accumulates scaled updates in a velocity buffer). All three variants (standard / centred / with-momentum) produce finite weights. Numerically matches `torch.optim.RMSprop`.
+
+### `optimizers/__init__.py`
+- Exports seven new classes: `Adam`, `AdamW`, `NAdam`, `RAdam`, `Adagrad`, `SGDMomentum`, `RMSprop`.
+
+### `train.py`
+- Import line updated: `from optimizers import Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop` added alongside existing custom imports.
+- `OPTIMIZER_REGISTRY`: seven entries previously calling `torch.optim.*` now call the custom implementations: `adam → Adam`, `adamw → AdamW`, `nadam → NAdam`, `radam → RAdam`, `adagrad → Adagrad`, `sgd → SGDMomentum(momentum=0.9, nesterov=True)`, `rmsprop → RMSprop`.
+
+### `benchmark.py`
+- Import line updated: same seven new classes imported.
+- `OPTIMIZER_REGISTRY`: same seven factories updated; comments added explaining each choice (e.g. SGD entry uses `momentum=0.0, nesterov=False`; SGD+Momentum uses `momentum=0.9, nesterov=True`).
+
+### `tests/test_new_optimizers.py` (new)
+- 54 tests across 7 classes (`TestAdam`, `TestAdamW`, `TestNAdam`, `TestRAdam`, `TestAdagrad`, `TestSGDMomentum`, `TestRMSprop`).
+- Per class: state initialisation, step counter, finite weights after many steps, weight decay shrinks norms, optimizer-specific invariants, numerical agreement with `torch.optim` reference.
+- Specific invariants:
+  - `TestAdamW`: `test_decoupled_decay_does_not_modify_gradient` — p.grad must be bit-for-bit identical before and after step; `test_adamw_vs_adam_with_decay` — coupled vs decoupled must diverge.
+  - `TestNAdam`: `test_mu_product_strictly_less_than_one` — running momentum product stays in (0, 1).
+  - `TestRAdam`: `test_early_steps_use_sgd_fallback` — v stays small after step 1 because the SGD path doesn't use v for the update.
+  - `TestAdagrad`: `test_sum_is_monotonically_increasing`, `test_initial_accumulator_value`, `test_lr_decay_reduces_effective_lr`, `test_effective_lr_decreases_over_steps`.
+  - `TestSGDMomentum`: `test_nesterov_requires_zero_dampening` (ValueError), `test_nesterov_vs_standard_momentum_differ`, `test_momentum_accumulates_velocity`.
+  - `TestRMSprop`: `test_no_momentum_buffer_by_default`, `test_centered_grad_avg_allocated`, `test_weights_finite_centered_and_momentum`, `test_square_avg_ema_decays`.
+- Total suite: 564 tests. All passing.
+
+
 
 ### `model.py`
 

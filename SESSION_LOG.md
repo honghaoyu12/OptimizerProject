@@ -779,14 +779,36 @@ Total tests: 308 (up from 303). CI green on `main`.
 
 ---
 
+## Session 29 — Custom Re-implementations of PyTorch Built-in Optimizers
+
+**What we discussed:**
+- The 7 optimizers `adam`, `adamw`, `nadam`, `radam`, `adagrad`, `sgd`, `rmsprop` were previously delegating to `torch.optim.*`. The goal was to replace all of them with custom implementations following the same `BaseOptimizer` pattern used by Lion, LAMB, Shampoo, etc.
+- All 7 now live in `optimizers/` as proper custom classes with full docstrings and heavy inline comments explaining every mathematical step.
+
+**What was built:**
+- `optimizers/adam.py` — `Adam`: bias-corrected first+second moments; coupled L2 weight decay; `addcdiv_` update.
+- `optimizers/adamw.py` — `AdamW`: same as Adam but decay applied directly to params (`p.mul_(1−α·λ)`) before gradient update — decoupled from second-moment scaling.
+- `optimizers/nadam.py` — `NAdam`: Nesterov lookahead via per-step momentum schedule; `mu_product` accumulator for exact bias correction.
+- `optimizers/radam.py` — `RAdam`: automatic warm-up via SMA length ρ_t; SGD-momentum fallback when ρ_t ≤ 5, full adaptive update otherwise with variance correction factor r_t.
+- `optimizers/adagrad.py` — `Adagrad`: cumulative G_t = Σ g²; `initial_accumulator_value` and `lr_decay` supported.
+- `optimizers/sgd_momentum.py` — `SGDMomentum`: velocity buffer, configurable `momentum`/`nesterov`/`dampening`; raises `ValueError` on `nesterov=True` + `dampening!=0`.
+- `optimizers/rmsprop.py` — `RMSprop`: EMA squared gradient; `centered` variant (normalise by variance); `momentum` variant (velocity buffer).
+- `optimizers/__init__.py` — updated to export all 7 new classes.
+- `train.py` / `benchmark.py` — OPTIMIZER_REGISTRY entries updated to use custom classes instead of `torch.optim.*`.
+- `tests/test_new_optimizers.py` — 54 tests: state init, step counter, finite weights, weight decay, optimizer-specific invariants, numerical agreement with torch.optim reference.
+
+**Total tests: 564. All passing. CI green.**
+
+---
+
 ## Current State
 
 | Component | Status |
 |---|---|
 | Models | MLP, ResNet-18, ViT |
 | Datasets | MNIST, FashionMNIST, CIFAR-10, CIFAR-100, Tiny ImageNet + 5 synthetic |
-| Optimizers | 20 in `train.py` (adam, adamw, nadam, radam, adagrad, sgd, rmsprop, vanilla_sgd, lion, lamb, shampoo, muon, adan, adahessian, adabelief, signsgd, adafactor, sophia, prodigy, sf_adamw); 19 in `benchmark.py` |
-| Schedulers | none, cosine, step, warmup_cosine |
+| Optimizers | 20 in `train.py` — all custom implementations: adam, adamw, nadam, radam, adagrad, sgd, rmsprop, vanilla_sgd, lion, lamb, shampoo, muon, adan, adahessian, adabelief, signsgd, adafactor, sophia, prodigy, sf_adamw; 19 in `benchmark.py` |
+| Schedulers | none, cosine, step, warmup_cosine, cosine_wr |
 | Early stopping | patience-based, restores best-epoch weights |
 | Gradient clipping | global norm clipping via `--max-grad-norm` |
 | Weight decay | per-parameter-group via `make_param_groups()` — biases and norm params excluded |
@@ -804,7 +826,7 @@ Total tests: 308 (up from 303). CI green on `main`.
 | LR sensitivity score | `_compute_lr_sensitivity()` + `plot_lr_sensitivity_scores()` in `visualizer.py`; Section 4.5 in report; `--save-lr-scores` in `benchmark.py` |
 | Logging | `logger.py` — timestamped session folders, epoch/batch CSVs, summary |
 | Benchmark reporting | `report.py` — Markdown narrative report via `--report-path` in `benchmark.py` |
-| Tests | 347 passing |
+| Tests | 564 passing |
 | CI | GitHub Actions, green on `main` |
 | GitHub | https://github.com/honghaoyu12/OptimizerProject |
 | Known bugs | None |
