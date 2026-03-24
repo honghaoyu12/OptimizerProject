@@ -77,10 +77,15 @@ class Sophia(BaseOptimizer):
     def step(self, closure=None):
         loss = None
         if closure is not None:
+            # Re-enable autograd inside the closure so backward() can run.
+            # We are under @torch.no_grad(), so this context manager is required.
             with torch.enable_grad():
                 loss = closure()
 
-        # Collect all params that have gradients
+        # ── Collect all parameters that have gradients this step ─────────────
+        # List comprehension form for conciseness; semantically identical to
+        # the loop form in AdaHessian.  Only parameters with non-None gradients
+        # participate in the update — frozen/unused parameters are skipped.
         all_pg: list[tuple] = [
             (p, p.grad, group)
             for group in self.param_groups
@@ -88,68 +93,131 @@ class Sophia(BaseOptimizer):
             if p.grad is not None
         ]
         if not all_pg:
+            # Nothing to update — return early (avoids indexing into empty list below)
             return loss
 
-        # Initialise state and increment step counters
+        # ── Initialise per-parameter state and increment step counters ────────
+        # We do the step increment here (before deciding whether to update the
+        # Hessian) so that `first_step` below reflects the current step number
+        # and can be used to determine the update schedule correctly.
         for p, g, group in all_pg:
             state = self.state[p]
             if len(state) == 0:
                 state["step"] = 0
+                # m: standard Adam-like first moment (EMA of the gradient)
                 state["exp_avg"] = torch.zeros_like(p)
-                # Initialise Hessian to ones so the first clipped update is
-                # bounded by ρ even before the first HVP is computed.
+                # h: Hessian diagonal EMA — initialised to ones so the very
+                # first clipped update is bounded by ρ even before any HVP
+                # is computed.  Using ones instead of zeros avoids a divide-by-zero
+                # on the first call when h is all zeros.
                 state["hess"] = torch.ones_like(p)
             state["step"] += 1
 
-        # Decide whether to recompute the Hessian this step (shared across all params)
+        # ── Decide whether to recompute the Hessian on this step ─────────────
+        # The Hessian update is amortised: we only recompute it every
+        # `update_freq` steps.  The condition `step % update_freq == 1` fires
+        # on steps 1, 11, 21, … (with the default update_freq=10).
+        # Starting at step 1 (not 0) ensures we always get a Hessian estimate
+        # before the first momentum-only update.
+        # All parameters share the same step counter (first param is the proxy).
         first_step = self.state[all_pg[0][0]]["step"]
         update_freq = all_pg[0][2]["update_freq"]
         update_hessian = (first_step % update_freq == 1)  # steps 1, 11, 21, ...
 
-        # Compute diagonal Hessian estimates via Hutchinson HVP
+        # ── Hutchinson Hessian diagonal estimates (computed only when scheduled) ─
+        # hessian_diags maps id(p) → estimated |diag(H)| tensor, same shape as p.
+        # On non-update steps this dict stays empty; the existing h values in
+        # state["hess"] continue to be used without modification.
         hessian_diags: dict[int, torch.Tensor] = {}
         if update_hessian:
-            use_hvp = all_pg[0][1].grad_fn is not None  # True when create_graph was used
+            # Check whether the computation graph is available (i.e., was
+            # loss.backward(create_graph=True) called?).  If grad_fn is not None,
+            # the gradient tensor is a non-leaf node in the autograd graph and
+            # we can differentiate through it to get H·z.
+            use_hvp = all_pg[0][1].grad_fn is not None
+
             if use_hvp:
+                # ── True Hessian-vector products via Hutchinson ───────────────
+                # For each parameter p:
+                #   1. Draw z ~ Rademacher({-1, +1})
+                #   2. Compute H·z = ∂(g^T z)/∂p via autograd
+                #   3. Estimate diag(H) ≈ |z ⊙ H·z|  (absolute value for stability)
+                # retain_graph=True for all but the last parameter so the graph
+                # stays alive for subsequent iterations; the last frees it.
                 for i, (p, g, _) in enumerate(all_pg):
+                    # Rademacher vector: ±1 with equal probability
+                    # randint(0,2) gives {0,1}; *2-1 maps to {-1,+1}
                     z = torch.randint_like(g, 0, 2).float().mul_(2.0).sub_(1.0)
                     with torch.enable_grad():
                         hz = torch.autograd.grad(
                             (g * z).sum(), p,
-                            retain_graph=(i < len(all_pg) - 1),
-                            create_graph=False,
+                            retain_graph=(i < len(all_pg) - 1),  # keep graph for next param
+                            create_graph=False,                    # no 3rd-order grads needed
                         )[0]
+                    # |z ⊙ H·z| — absolute value because the true diagonal of
+                    # a positive semi-definite Hessian should be non-negative;
+                    # absolute value removes sampling noise sign flips.
                     hessian_diags[id(p)] = (hz * z).detach().abs()
             else:
-                # Fallback: g² is an unbiased estimate of the diagonal Hessian
-                # for squared loss (Gauss-Newton approximation).
+                # ── Fallback: g² ≈ diag(H) (Gauss-Newton approximation) ──────
+                # For squared loss this is exact; for cross-entropy it is
+                # approximate but keeps Sophia behaving like a clipped version
+                # of Adam when the full second-order path is unavailable.
                 for p, g, _ in all_pg:
                     hessian_diags[id(p)] = g.detach().pow(2)
 
-        # Main parameter update
+        # ── Main parameter update ─────────────────────────────────────────────
+        # Applied every step (momentum update always; Hessian EMA only on
+        # scheduled steps).  The clipped update is Sophia's defining feature.
         for p, g, group in all_pg:
             lr = group["lr"]
             beta1, beta2 = group["betas"]
-            rho = group["rho"]
-            wd = group["weight_decay"]
+            rho = group["rho"]      # clip threshold for the normalised update
+            wd  = group["weight_decay"]
 
+            # .detach() prevents the gradient from being tracked in any future
+            # autograd graph.  Important because g may still have a grad_fn
+            # if create_graph=True was used.
             g_det = g.detach()
             state = self.state[p]
-            m = state["exp_avg"]
-            h = state["hess"]
+            m = state["exp_avg"]   # first moment buffer (alias, modified in-place)
+            h = state["hess"]      # Hessian diagonal EMA buffer (alias)
 
-            # Step 1: momentum EMA
+            # ── Step 1: Momentum EMA (every step) ────────────────────────────
+            # m_t = β₁ · m_{t-1} + (1 − β₁) · g_t
+            # Note: Sophia does NOT bias-correct m (unlike Adam) — the clip
+            # bound ρ provides an implicit normalisation that makes the bias
+            # correction less critical for stability.
             m.mul_(beta1).add_(g_det, alpha=1.0 - beta1)
 
-            # Step 2: Hessian EMA (only on update steps)
+            # ── Step 2: Hessian EMA (only on scheduled steps) ────────────────
+            # h_t = β₂ · h_{t-1} + (1 − β₂) · |diag(H)|
+            # Only executed when id(p) is in hessian_diags, i.e., on Hessian
+            # update steps.  Between updates, h retains its previous value —
+            # the EMA already smooths out the stale estimate gracefully.
             if id(p) in hessian_diags:
                 h.mul_(beta2).add_(hessian_diags[id(p)], alpha=1.0 - beta2)
 
-            # Step 3: clipped update
+            # ── Step 3: Decoupled weight decay (applied before the gradient update) ─
+            # p ← p · (1 − lr · λ)
+            # Sophia uses decoupled decay (like AdamW) so the regularisation
+            # strength is not inadvertently scaled by the Hessian preconditioning.
             if wd != 0.0:
                 p.mul_(1.0 - lr * wd)
+
+            # ── Step 4: Clipped Hessian-normalised update ────────────────────
+            # The raw update direction is m_t / max(h_t, ε).
+            # Dividing by h_t (not √h_t like Adam) uses the *full* curvature
+            # information, so directions with large curvature get proportionally
+            # smaller steps.  The clip to [-ρ, ρ] serves as the trust region:
+            # it prevents catastrophically large steps when h_t is near zero
+            # (e.g. very flat directions or early in training before the Hessian
+            # EMA has accumulated).
+            # h.clamp(min=1e-8): numerical guard in case h underflows to 0.0.
             update = m / h.clamp(min=1e-8)
-            update.clamp_(-rho, rho)
+            update.clamp_(-rho, rho)   # in-place clip to [-ρ, ρ]
+
+            # θ ← θ − lr · clip(m / max(h, ε), -ρ, ρ)
             p.add_(update, alpha=-lr)
 
         return loss

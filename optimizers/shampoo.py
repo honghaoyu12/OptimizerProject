@@ -82,101 +82,193 @@ class Shampoo(BaseOptimizer):
         orig_dtype = A.dtype
         orig_device = A.device
         try:
+            # Move to CPU float32: torch.linalg.eigh is only reliable on CPU,
+            # and float32 is sufficient for the 4th-root preconditioning accuracy.
             A_cpu = A.float().cpu()
-            # Regularise to ensure positive-definiteness
+
+            # Regularise the matrix to ensure strict positive-definiteness.
+            # Without this, near-zero eigenvalues would produce infinite inverse roots.
+            # ε·I shifts all eigenvalues up by ε, bounding the inverse root from above.
             A_cpu = A_cpu + epsilon * torch.eye(A_cpu.shape[0])
+
+            # Symmetric eigendecomposition: A = Q Λ Q^T, where Λ = diag(eigenvalues)
+            # torch.linalg.eigh exploits symmetry — more numerically stable and
+            # faster than torch.linalg.eig for symmetric matrices.
             eigenvalues, eigenvectors = torch.linalg.eigh(A_cpu)
+
+            # Clamp eigenvalues to [ε, ∞) to prevent negative eigenvalues (which
+            # can arise from numerical noise in nearly-singular matrices) from
+            # producing complex roots.
             eigenvalues = eigenvalues.clamp(min=epsilon)
+
+            # A^{-1/p} = Q · diag(λ_i^{-1/p}) · Q^T
+            # The formula uses the eigendecomposition A = Q Λ Q^T, so
+            # A^{-1/p} = Q Λ^{-1/p} Q^T = Q · diag(λ_i^{-1/p}) · Q^T.
+            # p=4 gives the fourth root, which is the Shampoo preconditioner.
             inv_root = (
                 eigenvectors
                 @ torch.diag(eigenvalues.pow(-1.0 / p))
-                @ eigenvectors.mT
+                @ eigenvectors.mT   # .mT is the conjugate transpose (= .T for real matrices)
             )
+            # Move result back to the original device and dtype for use in the update
             return inv_root.to(dtype=orig_dtype, device=orig_device)
         except Exception:
+            # Any numerical failure (non-convergence, NaN, etc.) falls back to
+            # the identity matrix — this gives an unscaled gradient step for
+            # this parameter, which is safe even if suboptimal.
             return fallback
 
     @torch.no_grad()
     def step(self, closure=None):
         loss = None
         if closure is not None:
+            # Re-enable autograd so the closure can call backward().
             with torch.enable_grad():
                 loss = closure()
 
         for group in self.param_groups:
-            lr            = group["lr"]
-            momentum      = group["momentum"]
-            wd            = group["weight_decay"]
-            epsilon       = group["epsilon"]
-            decay         = group["precond_decay"]
-            update_freq   = group["update_freq"]
-            max_size      = group["max_precond_size"]
+            lr          = group["lr"]
+            momentum    = group["momentum"]
+            wd          = group["weight_decay"]
+            epsilon     = group["epsilon"]       # regulariser for preconditioner diagonal
+            decay       = group["precond_decay"] # EMA decay for Kronecker factors
+            update_freq = group["update_freq"]   # how often to recompute inverse roots
+            max_size    = group["max_precond_size"]  # size threshold for Kronecker vs diagonal
 
             for p in group["params"]:
                 if p.grad is None:
                     continue
 
+                # Clone the gradient so we can add weight decay without
+                # modifying p.grad in-place (which would affect other users
+                # of the gradient, e.g. gradient accumulation scenarios).
                 g = p.grad.clone()
+
+                # ── Coupled L2 weight decay ───────────────────────────────────
+                # Add λ·θ to the gradient so the regularisation signal also
+                # flows through the Kronecker preconditioner (unlike decoupled
+                # forms where decay bypasses the preconditioner entirely).
                 if wd != 0.0:
                     g.add_(p, alpha=wd)
 
                 state = self.state[p]
 
-                # ── Determine whether to use Kronecker or diagonal ──────────
+                # ── Determine Kronecker vs. diagonal preconditioner ───────────
+                # Kronecker factoring requires the parameter to be at least 2-D
+                # (has both row and column dimensions).  For very large layers
+                # (e.g. the 512×10 final FC head of a ResNet), the Kronecker
+                # factors would be 512×512 and 10×10 — manageable.  For
+                # embedding layers that might be 50000×512, the left factor
+                # would be 50000×50000 — prohibitive.  max_precond_size guards
+                # against this memory/compute explosion.
                 if p.dim() >= 2:
                     rows = p.shape[0]
-                    cols = p.numel() // rows
+                    cols = p.numel() // rows   # flatten all dims except the first
                     use_kronecker = rows <= max_size and cols <= max_size
                 else:
+                    # 1-D parameters (biases, LayerNorm scales) get diagonal treatment:
+                    # no meaningful Kronecker structure to exploit.
                     rows = cols = None
                     use_kronecker = False
 
-                # ── Initialise state on first call ──────────────────────────
+                # ── Initialise state on the very first call ───────────────────
                 if len(state) == 0:
                     state["step"] = 0
+                    # momentum_buffer: velocity buffer for the SGD-like outer update.
+                    # Initialised to zeros — first step applies pure preconditioned gradient.
                     state["momentum_buffer"] = torch.zeros_like(p)
+                    # Record the preconditioner type so we can assert consistency later.
                     state["use_kronecker"] = use_kronecker
+
                     if use_kronecker:
-                        # Initialise as identity — safe starting point
+                        # L: left Kronecker factor, shape (rows, rows)
+                        # R: right Kronecker factor, shape (cols, cols)
+                        # Both initialised to identity — safe starting point that
+                        # gives an unscaled gradient on the first step.
                         state["L"] = torch.eye(rows, device=p.device, dtype=p.dtype)
                         state["R"] = torch.eye(cols, device=p.device, dtype=p.dtype)
+                        # L_inv_root, R_inv_root: cached inverse 4th-roots of L and R.
+                        # Recomputed every `update_freq` steps via eigendecomposition.
+                        # Initialised to identity so the first step is unscaled.
                         state["L_inv_root"] = torch.eye(rows, device=p.device, dtype=p.dtype)
                         state["R_inv_root"] = torch.eye(cols, device=p.device, dtype=p.dtype)
                     else:
+                        # sum_sq: diagonal second-moment accumulator (Adagrad-style).
+                        # shape matches p — each element tracks Σ g_i² over all steps.
                         state["sum_sq"] = torch.zeros_like(p)
 
                 state["step"] += 1
                 t = state["step"]
 
-                # ── Compute preconditioned update ───────────────────────────
+                # ── Compute preconditioned gradient ───────────────────────────
                 if state["use_kronecker"]:
+                    # Reshape p to 2-D for Kronecker arithmetic.
+                    # Higher-dim tensors (Conv2d weight: C_out × C_in × kH × kW)
+                    # are flattened to (C_out, C_in * kH * kW) — the standard
+                    # Shampoo convention for convolutional layers.
                     g_2d = g.reshape(rows, cols)
 
-                    # EMA update of Kronecker factors (keeps matrices bounded)
-                    outer_L = g_2d @ g_2d.mT
-                    outer_R = g_2d.mT @ g_2d
+                    # ── EMA update of Kronecker factors ───────────────────────
+                    # L_t = decay · L_{t-1} + (1-decay) · G G^T    (left factor)
+                    # R_t = decay · R_{t-1} + (1-decay) · G^T G    (right factor)
+                    # Using EMA (rather than a pure running sum) prevents L and R
+                    # from growing without bound.  The EMA effectively forgets
+                    # old gradient statistics at rate (1-decay) per step,
+                    # keeping the preconditioner adapted to recent curvature.
+                    outer_L = g_2d @ g_2d.mT    # (rows, rows): left Gram matrix
+                    outer_R = g_2d.mT @ g_2d    # (cols, cols): right Gram matrix
                     state["L"].mul_(decay).add_(outer_L, alpha=1.0 - decay)
                     state["R"].mul_(decay).add_(outer_R, alpha=1.0 - decay)
 
-                    # Recompute inverse roots periodically
+                    # ── Recompute inverse roots periodically ──────────────────
+                    # Eigendecomposition is expensive (O(n³)), so we only
+                    # recompute every `update_freq` steps.  The cached inverse
+                    # root from the previous update step is used in between.
+                    # t == 1: always recompute on the first step (from identity).
+                    # t % update_freq == 0: recompute every `update_freq` steps.
                     if t == 1 or t % update_freq == 0:
+                        # Identity fallback: used if eigendecomposition fails
                         eye_L = torch.eye(rows, device=p.device, dtype=p.dtype)
                         eye_R = torch.eye(cols, device=p.device, dtype=p.dtype)
+                        # L^{-1/4}: inverse fourth root of the left factor
                         state["L_inv_root"] = self._matrix_inv_pth_root(
                             state["L"], 4, epsilon, fallback=eye_L)
+                        # R^{-1/4}: inverse fourth root of the right factor
                         state["R_inv_root"] = self._matrix_inv_pth_root(
                             state["R"], 4, epsilon, fallback=eye_R)
 
+                    # ── Apply Kronecker preconditioner ────────────────────────
+                    # precond = L^{-1/4} · G · R^{-1/4}
+                    # This is the matrix equivalent of dividing each gradient
+                    # element by the square root of its curvature.  The 4th-root
+                    # is used (rather than the square root) because we have TWO
+                    # factors (left and right), each contributing a square root,
+                    # and their product gives the full square root of the Kronecker
+                    # approximation to H: (L⊗R)^{-1/2} ≈ L^{-1/4} ⊗ R^{-1/4}.
                     precond = state["L_inv_root"] @ g_2d @ state["R_inv_root"]
+                    # Reshape back to the original parameter shape before the
+                    # momentum + parameter update below.
                     update = precond.reshape(p.shape)
+
                 else:
-                    # Diagonal (Adagrad-style) fallback
-                    state["sum_sq"].addcmul_(g, g)
+                    # ── Diagonal (Adagrad-style) fallback ────────────────────
+                    # G_t = G_{t-1} + g²   (running sum of squared gradients)
+                    # This is the standard Adagrad accumulator — no EMA, just
+                    # a monotonically growing sum.  The preconditioned gradient
+                    # is g / (√G_t + ε), which shrinks over time.
+                    state["sum_sq"].addcmul_(g, g)   # addcmul_ does: sum_sq += g * g
                     update = g / (state["sum_sq"].sqrt() + epsilon)
 
-                # ── Momentum + parameter update ─────────────────────────────
+                # ── Momentum + parameter update ───────────────────────────────
+                # Apply standard SGD momentum on top of the preconditioned gradient.
+                # buf_t = μ · buf_{t-1} + update_t
+                # θ_t   = θ_{t-1} − lr · buf_t
+                #
+                # Note: this is the "heavy-ball" form of momentum (not Nesterov).
+                # The preconditioned update enters the velocity buffer directly,
+                # which means the momentum accumulates pre-conditioned directions.
                 buf = state["momentum_buffer"]
-                buf.mul_(momentum).add_(update)
-                p.add_(buf, alpha=-lr)
+                buf.mul_(momentum).add_(update)   # velocity: exponentially decay + add new
+                p.add_(buf, alpha=-lr)            # parameter: step along accumulated velocity
 
         return loss

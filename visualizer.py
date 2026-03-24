@@ -165,15 +165,26 @@ class Visualizer:
         self.ax_hess.set_ylabel("Hessian Trace")
 
     def _redraw(self) -> None:
+        # ep is the list of epoch numbers (x-axis for all epoch-level panels).
+        # All axes are cleared and redrawn from scratch each call — this
+        # avoids accumulation of old lines when the figure is updated live.
         ep = self.epochs
 
-        # ---- Loss vs Epoch ----
+        # ── Panel 1: Loss vs Epoch ────────────────────────────────────────────
+        # Shows train (blue) and test (red) cross-entropy loss on the same axis.
+        # A secondary y-axis (right side, gray) shows the learning rate schedule
+        # overlaid so we can visually correlate LR drops with loss decreases.
         ax = self.ax_loss
         ax.clear()
         ax.set_title("Loss vs Epoch"); ax.set_xlabel("Epoch"); ax.set_ylabel("Cross-entropy loss")
         ax.plot(ep, self.train_losses, "o-", color="#2196F3", label="Train")
         ax.plot(ep, self.test_losses,  "s--", color="#F44336", label="Test")
         ax.legend(fontsize=8)
+
+        # Only draw LR axis if we have at least one finite LR value.
+        # LR may be NaN if the optimizer didn't record it (e.g. Prodigy self-tunes).
+        # twinx() creates a second y-axis that shares the same x-axis range,
+        # allowing two differently-scaled quantities on the same plot.
         finite_lrs = [lr for lr in self._lrs if not math.isnan(lr)]
         if finite_lrs:
             ax2_lr = ax.twinx()
@@ -182,16 +193,23 @@ class Visualizer:
             ax2_lr.tick_params(axis="y", labelcolor="#9E9E9E", labelsize=7)
             ax2_lr.legend(loc="upper right", fontsize=7)
 
-        # ---- Accuracy vs Epoch ----
+        # ── Panel 2: Accuracy vs Epoch ────────────────────────────────────────
+        # Same colour coding as the loss panel (blue=train, red=test).
+        # y-axis forced to [0, 101] so small improvements are visually meaningful
+        # and the scale is consistent across multiple redraws.
         ax = self.ax_acc
         ax.clear()
         ax.set_title("Accuracy vs Epoch"); ax.set_xlabel("Epoch"); ax.set_ylabel("Accuracy (%)")
         ax.plot(ep, self.train_accs, "o-", color="#2196F3", label="Train")
         ax.plot(ep, self.test_accs,  "s--", color="#F44336", label="Test")
-        ax.set_ylim(0, 101)
+        ax.set_ylim(0, 101)   # fixed range so the plot doesn't rescale every epoch
         ax.legend(fontsize=8)
 
-        # ---- Loss vs Steps ----
+        # ── Panel 3: Loss vs Steps (batch-level) ─────────────────────────────
+        # all_step_losses accumulates every mini-batch loss throughout training
+        # (not just per-epoch means), so the x-axis is the global step count.
+        # linewidth=0.8 and alpha=0.7 keep the high-frequency noise readable
+        # without dominating the visual; thin + semi-transparent = detail without clutter.
         ax = self.ax_steps
         ax.clear()
         ax.set_title("Loss vs Steps (batch-level)"); ax.set_xlabel("Step"); ax.set_ylabel("Cross-entropy loss")
@@ -199,7 +217,14 @@ class Visualizer:
             steps = list(range(1, len(self.all_step_losses) + 1))
             ax.plot(steps, self.all_step_losses, color="#9C27B0", linewidth=0.8, alpha=0.7)
 
-        # ---- Global Gradient Norm ----
+        # ── Panel 4: Global Gradient Norm ────────────────────────────────────
+        # grad_norm_globals is the L2 norm of the full concatenated gradient
+        # vector (computed after clipping, if any).  grad_norm_stds is the
+        # standard deviation of per-layer norms — wider std bands indicate that
+        # some layers receive very different gradient magnitudes than others,
+        # which can signal training instability or dead layers.
+        # NaN filtering: gradient norms may be NaN if no valid parameter received
+        # a gradient (e.g. the model is frozen).  We skip those epochs.
         ax = self.ax_ggrad
         ax.clear()
         ax.set_title("Global Gradient Norm"); ax.set_xlabel("Epoch"); ax.set_ylabel("‖∇θ‖₂")
@@ -210,28 +235,43 @@ class Visualizer:
             gv_arr = np.array(gv)
             sv_arr = np.array(sv)
             ax.plot(ev, gv_arr, "o-", color="#009688", label="mean")
+            # fill_between shows the ±std band — alpha=0.25 makes it translucent
+            # so the mean line remains clearly visible through the shaded region.
             ax.fill_between(ev, gv_arr - sv_arr, gv_arr + sv_arr,
                             alpha=0.25, color="#009688", label="±std")
             ax.legend(fontsize=8)
 
-        # ---- Weight norms per layer ----
+        # ── Panel 5: Weight L2 Norm per Layer ────────────────────────────────
+        # One line per named layer, using the _PALETTE colour list (cycling when
+        # there are more layers than colours).  Weight norm growth over training
+        # indicates that the optimizer is not effectively regularising; a flat
+        # or shrinking norm suggests weight decay or Lion's sign update is active.
         ax = self.ax_weight
         ax.clear()
         ax.set_title("Weight L2 Norm per Layer"); ax.set_xlabel("Epoch"); ax.set_ylabel("‖W‖₂")
         for i, name in enumerate(self.layer_names):
-            color = self._PALETTE[i % len(self._PALETTE)]
+            color = self._PALETTE[i % len(self._PALETTE)]  # cycle colours for >8 layers
             ax.plot(ep, self.weight_norms[name], "o-", color=color, label=name)
         ax.legend(fontsize=7)
 
-        # ---- Hessian Trace & Sharpness ----
+        # ── Panel 6: Hessian Trace & Sharpness ───────────────────────────────
+        # Both metrics are expensive to compute every epoch (they require
+        # additional forward/backward passes), so they may be all-NaN if
+        # --hessian / --sharpness flags were not passed.
+        # When both are available, Sharpness uses a secondary y-axis (twinx)
+        # because its scale (0.001–0.1) is different from Hessian Trace (10³–10⁶).
         ax = self.ax_hess
         ax.clear()
         ax.set_title("Hessian Trace & Sharpness"); ax.set_xlabel("Epoch")
 
+        # Filter out NaN entries (epochs where the metric wasn't computed)
         ht_valid = [(e, h) for e, h in zip(ep, self.hessian_traces) if not math.isnan(h)]
         sh_valid = [(e, s) for e, s in zip(ep, self.sharpnesses)    if not math.isnan(s)]
 
         if not ht_valid and not sh_valid:
+            # Neither metric was computed — show an informative placeholder message
+            # instead of a blank panel.  transform=ax.transAxes uses axes coordinates
+            # (0–1) so the text is centred regardless of the data range.
             ax.text(0.5, 0.5, "not computed\n(use --hessian)",
                     ha="center", va="center", transform=ax.transAxes,
                     fontsize=10, color="gray", style="italic")
@@ -242,6 +282,8 @@ class Visualizer:
                 ax.plot(ev, hv, "o-", color="#FF5722", label="Hessian Trace")
                 ax.legend(loc="upper left", fontsize=8)
             if sh_valid:
+                # Secondary y-axis for Sharpness: different scale from Hessian Trace,
+                # so we use a twin axis rather than plotting on the same scale.
                 ax2 = ax.twinx()
                 ax2.set_ylabel("Sharpness")
                 ev, sv = zip(*sh_valid)
