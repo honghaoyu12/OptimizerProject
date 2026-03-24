@@ -3,7 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
+from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW, SOAP, CautiousAdam, MARS, GrokFast
 from train import build_optimizer, OPTIMIZER_REGISTRY
 
 
@@ -43,6 +43,8 @@ class TestOptimizerRegistry:
             "sgd", "rmsprop", "vanilla_sgd", "lion", "lamb", "shampoo",
             "muon", "adan", "adahessian", "adabelief", "signsgd", "adafactor",
             "sophia", "prodigy", "sf_adamw",
+            # New optimizers (2024)
+            "soap", "cautious_adam", "mars", "grokfast",
         }
         assert expected == set(OPTIMIZER_REGISTRY.keys())
 
@@ -657,3 +659,267 @@ class TestScheduleFreeAdamW:
         averaged = opt.get_averaged_params()
         for avg, p in zip(averaged, model.parameters()):
             assert torch.allclose(avg, opt.state[p]["x"])
+
+
+# ---------------------------------------------------------------------------
+# SOAP
+# ---------------------------------------------------------------------------
+
+class TestSOAP:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = SOAP(model.parameters(), lr=3e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        w = model.weight
+        assert "L" in opt.state[w]
+        assert "R" in opt.state[w]
+        assert "exp_avg" in opt.state[w]
+        assert "exp_avg_sq" in opt.state[w]
+
+    def test_diagonal_fallback_for_oversized(self):
+        """Matrices exceeding max_precond_size should use plain Adam (no L/R)."""
+        model = nn.Linear(8, 4)   # weight shape 4×8; set limit below both dims
+        opt = SOAP(model.parameters(), lr=3e-3, max_precond_size=3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        w = model.weight
+        # Falls back to plain Adam — no Kronecker factors stored
+        assert "L" not in opt.state[w]
+        assert "R" not in opt.state[w]
+
+    def test_kronecker_updated_at_update_freq(self):
+        """Q_L/Q_R eigenvectors should be refreshed at multiples of update_freq."""
+        model = nn.Linear(8, 4, bias=False)
+        opt = SOAP(model.parameters(), lr=3e-3, update_freq=5)
+        # Run enough steps to trigger an eigenvector refresh
+        for _ in range(6):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        w = model.weight
+        # Q_L and Q_R should exist after a refresh
+        assert "Q_L" in opt.state[w]
+        assert "Q_R" in opt.state[w]
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = SOAP(model.parameters(), lr=3e-3)
+        for _ in range(25):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_weight_decay_shrinks_params(self):
+        def _run(wd):
+            torch.manual_seed(0)
+            model = nn.Linear(4, 2, bias=False)
+            nn.init.constant_(model.weight, 1.0)
+            opt = SOAP(model.parameters(), lr=3e-3, weight_decay=wd)
+            for _ in range(5):
+                model(torch.randn(2, 4)).sum().backward()
+                opt.step()
+                opt.zero_grad()
+            return model.weight.norm().item()
+
+        assert _run(1.0) < _run(0.0)
+
+
+# ---------------------------------------------------------------------------
+# CautiousAdam
+# ---------------------------------------------------------------------------
+
+class TestCautiousAdam:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = CautiousAdam(model.parameters(), lr=1e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "step" in opt.state[p]
+            assert "exp_avg" in opt.state[p]
+            assert "exp_avg_sq" in opt.state[p]
+
+    def test_step_counter_increments(self):
+        model = nn.Linear(8, 4)
+        opt = CautiousAdam(model.parameters(), lr=1e-3)
+        for i in range(1, 4):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert opt.state[p]["step"] == 3
+
+    def test_masked_update_direction(self):
+        """With a large positive constant weight and input, gradient is positive,
+        so the Adam update is negative.  The mask should keep the update (sign
+        agrees) and the weight should decrease."""
+        model = nn.Linear(4, 2, bias=False)
+        nn.init.constant_(model.weight, 1.0)
+        opt = CautiousAdam(model.parameters(), lr=0.5)
+        model(torch.ones(1, 4)).sum().backward()
+        opt.step()
+        assert (model.weight < 1.0).all()
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = CautiousAdam(model.parameters(), lr=1e-3)
+        for _ in range(20):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_weight_decay_shrinks_params(self):
+        def _run(wd):
+            torch.manual_seed(0)
+            model = nn.Linear(4, 2, bias=False)
+            nn.init.constant_(model.weight, 1.0)
+            opt = CautiousAdam(model.parameters(), lr=1e-3, weight_decay=wd)
+            for _ in range(5):
+                model(torch.randn(2, 4)).sum().backward()
+                opt.step()
+                opt.zero_grad()
+            return model.weight.norm().item()
+
+        assert _run(1.0) < _run(0.0)
+
+
+# ---------------------------------------------------------------------------
+# MARS
+# ---------------------------------------------------------------------------
+
+class TestMARS:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = MARS(model.parameters(), lr=3e-4)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "step" in opt.state[p]
+            assert "exp_avg" in opt.state[p]
+            assert "exp_avg_sq" in opt.state[p]
+            assert "prev_grad" in opt.state[p]
+
+    def test_prev_grad_stored(self):
+        """prev_grad at step t should equal the gradient used at step t."""
+        model = nn.Linear(4, 2, bias=False)
+        opt = MARS(model.parameters(), lr=3e-4)
+        model(torch.ones(2, 4)).sum().backward()
+        g_step1 = model.weight.grad.clone()
+        opt.step()
+        # After step 1, prev_grad should be the gradient from step 1
+        assert torch.allclose(opt.state[model.weight]["prev_grad"], g_step1)
+
+    def test_step_counter_increments(self):
+        model = nn.Linear(8, 4)
+        opt = MARS(model.parameters(), lr=3e-4)
+        for _ in range(3):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert opt.state[p]["step"] == 3
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = MARS(model.parameters(), lr=3e-4)
+        for _ in range(20):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_weight_decay_shrinks_params(self):
+        def _run(wd):
+            torch.manual_seed(0)
+            model = nn.Linear(4, 2, bias=False)
+            nn.init.constant_(model.weight, 1.0)
+            opt = MARS(model.parameters(), lr=3e-4, weight_decay=wd)
+            for _ in range(5):
+                model(torch.randn(2, 4)).sum().backward()
+                opt.step()
+                opt.zero_grad()
+            return model.weight.norm().item()
+
+        assert _run(1.0) < _run(0.0)
+
+
+# ---------------------------------------------------------------------------
+# GrokFast
+# ---------------------------------------------------------------------------
+
+class TestGrokFast:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = GrokFast(model.parameters(), lr=1e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "step" in opt.state[p]
+            assert "exp_avg" in opt.state[p]
+            assert "exp_avg_sq" in opt.state[p]
+            assert "grad_ema" in opt.state[p]
+
+    def test_grad_ema_initialized_to_first_gradient(self):
+        """On first step, grad_ema should be initialised to the gradient."""
+        model = nn.Linear(4, 2, bias=False)
+        opt = GrokFast(model.parameters(), lr=1e-3)
+        model(torch.ones(2, 4)).sum().backward()
+        g_init = model.weight.grad.clone()
+        opt.step()
+        # After step 1, grad_ema should equal the first gradient
+        assert torch.allclose(opt.state[model.weight]["grad_ema"], g_init, atol=1e-6)
+
+    def test_grad_ema_decays_over_steps(self):
+        """grad_ema should change across steps (EMA update)."""
+        model = nn.Linear(4, 2, bias=False)
+        opt = GrokFast(model.parameters(), lr=1e-3, alpha=0.9)
+        model(torch.randn(2, 4)).sum().backward()
+        opt.step()
+        opt.zero_grad()
+        ema_after_1 = opt.state[model.weight]["grad_ema"].clone()
+        model(torch.randn(2, 4)).sum().backward()
+        opt.step()
+        opt.zero_grad()
+        ema_after_2 = opt.state[model.weight]["grad_ema"]
+        # EMA must have changed (different random gradients each step)
+        assert not torch.allclose(ema_after_1, ema_after_2)
+
+    def test_step_counter_increments(self):
+        model = nn.Linear(8, 4)
+        opt = GrokFast(model.parameters(), lr=1e-3)
+        for _ in range(3):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert opt.state[p]["step"] == 3
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = GrokFast(model.parameters(), lr=1e-3)
+        for _ in range(20):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_weight_decay_shrinks_params(self):
+        def _run(wd):
+            torch.manual_seed(0)
+            model = nn.Linear(4, 2, bias=False)
+            nn.init.constant_(model.weight, 1.0)
+            opt = GrokFast(model.parameters(), lr=1e-3, weight_decay=wd)
+            for _ in range(5):
+                model(torch.randn(2, 4)).sum().backward()
+                opt.step()
+                opt.zero_grad()
+            return model.weight.norm().item()
+
+        assert _run(1.0) < _run(0.0)

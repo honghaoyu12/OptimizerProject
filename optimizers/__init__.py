@@ -20,6 +20,11 @@ from .radam import RAdam
 from .adagrad import Adagrad
 from .sgd_momentum import SGDMomentum
 from .rmsprop import RMSprop
+# New optimizers (2024)
+from .soap import SOAP
+from .cautious_adam import CautiousAdam
+from .mars import MARS
+from .grokfast import GrokFast
 
 __all__ = [
     "BaseOptimizer", "VanillaSGD", "Lion", "LAMB", "Shampoo",
@@ -27,4 +32,6 @@ __all__ = [
     "Sophia", "Prodigy", "ScheduleFreeAdamW",
     # Custom built-in equivalents
     "Adam", "AdamW", "NAdam", "RAdam", "Adagrad", "SGDMomentum", "RMSprop",
+    # New optimizers (2024)
+    "SOAP", "CautiousAdam", "MARS", "GrokFast",
 ]

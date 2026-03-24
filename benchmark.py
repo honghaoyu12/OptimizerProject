@@ -50,6 +50,8 @@ from model import MLP, ResNet18, ViT
 from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
 # Custom re-implementations of PyTorch built-in optimizers
 from optimizers import Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop
+# New optimizers (2024)
+from optimizers import SOAP, CautiousAdam, MARS, GrokFast
 from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
@@ -223,12 +225,27 @@ OPTIMIZER_REGISTRY: OrderedDict = OrderedDict([
         "default_lr": 0.001,
         "color":      "#2ca02c",   # green
     }),
-    # --- ADD YOUR CUSTOM OPTIMIZER HERE ---
-    # ("MyOptimizer", {
-    #     "factory":    lambda p, lr, wd: MyOptimizer(p, lr=lr, weight_decay=wd),
-    #     "default_lr": 0.001,
-    #     "color":      "#e377c2",
-    # }),
+    # New optimizers (2024)
+    ("SOAP",         {
+        "factory":    lambda p, lr, wd: SOAP(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.003,
+        "color":      "#1f77b4",   # steel blue
+    }),
+    ("CautiousAdam", {
+        "factory":    lambda p, lr, wd: CautiousAdam(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.001,
+        "color":      "#ff9896",   # light red
+    }),
+    ("MARS",         {
+        "factory":    lambda p, lr, wd: MARS(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.0003,
+        "color":      "#98df8a",   # light green
+    }),
+    ("GrokFast",     {
+        "factory":    lambda p, lr, wd: GrokFast(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.001,
+        "color":      "#c5b0d5",   # lavender
+    }),
 ])
 
 

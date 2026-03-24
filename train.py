@@ -78,6 +78,8 @@ import numpy as np
 from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
 # Custom re-implementations of PyTorch built-in optimizers
 from optimizers import Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop
+# New optimizers (2024)
+from optimizers import SOAP, CautiousAdam, MARS, GrokFast
 
 # Optimizers that call loss.backward(create_graph=True) inside their own step()
 # to estimate Hessian-vector products.  GradScaler's loss scaling corrupts the
@@ -134,8 +136,11 @@ OPTIMIZER_REGISTRY: dict = {
     "sophia":      lambda p, lr, wd: Sophia(p, lr=lr, weight_decay=wd),
     "prodigy":     lambda p, lr, wd: Prodigy(p, lr=lr, weight_decay=wd),
     "sf_adamw":    lambda p, lr, wd: ScheduleFreeAdamW(p, lr=lr, weight_decay=wd),
-    # --- ADD YOUR OPTIMIZER HERE ---
-    # "my_optimizer": lambda p, lr, wd: MyOptimizer(p, lr=lr, weight_decay=wd),
+    # New optimizers (2024)
+    "soap":          lambda p, lr, wd: SOAP(p, lr=lr, weight_decay=wd),
+    "cautious_adam": lambda p, lr, wd: CautiousAdam(p, lr=lr, weight_decay=wd),
+    "mars":          lambda p, lr, wd: MARS(p, lr=lr, weight_decay=wd),
+    "grokfast":      lambda p, lr, wd: GrokFast(p, lr=lr, weight_decay=wd),
 }
 
 # ---------------------------------------------------------------------------
