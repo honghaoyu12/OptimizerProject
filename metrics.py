@@ -1,22 +1,33 @@
 """Optimizer diagnostic metrics: Hessian trace, loss-surface sharpness,
-dead neuron tracking, weight effective rank, gradient noise scale, and
-Fisher information trace.
+dead neuron tracking, weight effective rank, gradient noise scale, Fisher
+information trace, loss of plasticity, gradient alignment, spectral norm,
+and optimizer state entropy.
 
 All metrics probe the current training state from different angles:
 
-  Hessian trace     Tr(H) — total curvature via Hutchinson's estimator.
-  Sharpness         max_{‖δ‖≤ε} L(θ+δ) − L(θ) — SAM-style worst-case
-                    loss increase under a bounded perturbation.
-  Dead neurons      Fraction of ReLU units that never fire on a full
-                    dataset pass — a proxy for wasted model capacity.
-  Weight rank       Effective rank of each weight matrix via SVD entropy —
-                    low rank indicates redundant or collapsed representations.
-  Grad noise scale  ||E[g]||² / E[||g||²] — ratio of signal power to total
-                    gradient power; large = low noise, small = dominated by
-                    mini-batch variance.
-  Fisher trace      E[||∇_θ log p(y|x)||²] — expected squared gradient norm,
-                    a lightweight curvature proxy requiring only first-order
-                    backprop.
+  Hessian trace       Tr(H) — total curvature via Hutchinson's estimator.
+  Sharpness           max_{‖δ‖≤ε} L(θ+δ) − L(θ) — SAM-style worst-case
+                      loss increase under a bounded perturbation.
+  Dead neurons        Fraction of ReLU units that never fire on a full
+                      dataset pass — a proxy for wasted model capacity.
+  Weight rank         Effective rank of each weight matrix via SVD entropy —
+                      low rank indicates redundant or collapsed representations.
+  Grad noise scale    ||E[g]||² / E[||g||²] — ratio of signal power to total
+                      gradient power; large = low noise, small = dominated by
+                      mini-batch variance.
+  Fisher trace        E[||∇_θ log p(y|x)||²] — expected squared gradient norm,
+                      a lightweight curvature proxy requiring only first-order
+                      backprop.
+  Plasticity score    Recovery delta-acc after resetting the last layer and
+                      briefly retraining — high score = still plastic.
+  Gradient alignment  Cosine similarity between the first and last linear
+                      layer gradient directions — near +1 means end-to-end
+                      cooperative update; near -1 means gradient reversal.
+  Spectral norm       Largest singular value σ_max(W) per weight matrix —
+                      proxy for the Lipschitz constant; high values risk
+                      training instability.
+  Optimizer entropy   Shannon entropy of the momentum / variance buffers —
+                      collapses near convergence as state concentrates.
 
 All functions catch exceptions and return float('nan') / empty dicts on
 failure so that a single incompatible device does not crash the training run.
@@ -551,3 +562,260 @@ def compute_fisher_trace(
     except Exception:
         return float("nan")
 
+
+# ---------------------------------------------------------------------------
+# Plasticity score
+# ---------------------------------------------------------------------------
+
+def compute_plasticity_score(
+    model: "nn.Module",
+    train_loader,
+    test_loader,
+    criterion: "nn.Module",
+    device: "torch.device",
+    n_epochs: int = 3,
+) -> float:
+    """Estimate the network's remaining plasticity via last-layer reset.
+
+    Resets the last Linear layer's weights to their initialisation defaults,
+    then fine-tunes for *n_epochs* epochs (all other layers frozen) and
+    measures the accuracy recovery.  A high score means the network can
+    still reorganise its final representations quickly — i.e. it retains
+    plasticity.  A score near 0 means the hidden representations are too
+    rigid to support rapid re-adaptation (loss of plasticity).
+
+    The returned value is the test accuracy achieved after recovery, so it
+    lives in [0, 1] and can be compared directly across optimizers and
+    epochs.
+
+    Parameters
+    ----------
+    model       : nn.Module — the *currently trained* model (not modified
+                  in-place; a deep copy is used internally)
+    train_loader: DataLoader for training data
+    test_loader : DataLoader for evaluation
+    criterion   : loss function (e.g. CrossEntropyLoss)
+    device      : torch.device
+    n_epochs    : number of fine-tuning epochs after the last-layer reset
+                  (default 3 — enough to measure recovery without being
+                  expensive)
+
+    Returns
+    -------
+    float
+        Test accuracy after recovery in [0, 1], or float('nan') on failure.
+    """
+    import copy
+
+    try:
+        # Work on a deep copy so the original model is never touched.
+        m = copy.deepcopy(model).to(device)
+
+        # Locate the last nn.Linear layer.
+        last_linear: nn.Linear | None = None
+        for mod in m.modules():
+            if isinstance(mod, nn.Linear):
+                last_linear = mod
+        if last_linear is None:
+            return float("nan")
+
+        # Reset the last linear layer to default initialisation (Kaiming
+        # uniform for weight, uniform for bias — matches nn.Linear.__init__).
+        nn.init.kaiming_uniform_(last_linear.weight, a=math.sqrt(5))
+        if last_linear.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(last_linear.weight)
+            bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+            nn.init.uniform_(last_linear.bias, -bound, bound)
+
+        # Freeze all layers except the last linear.
+        for p in m.parameters():
+            p.requires_grad_(False)
+        for p in last_linear.parameters():
+            p.requires_grad_(True)
+
+        # Fine-tune with a fresh Adam on the last layer only.
+        opt = torch.optim.Adam(last_linear.parameters(), lr=1e-3)
+        m.train()
+        for _ in range(n_epochs):
+            for images, labels in train_loader:
+                images, labels = images.to(device), labels.to(device)
+                opt.zero_grad()
+                criterion(m(images), labels).backward()
+                opt.step()
+
+        # Measure recovery accuracy on the test set.
+        m.eval()
+        correct = total = 0
+        with torch.no_grad():
+            for images, labels in test_loader:
+                images, labels = images.to(device), labels.to(device)
+                preds = m(images).argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total   += labels.size(0)
+
+        return float(correct / total) if total > 0 else float("nan")
+
+    except Exception:
+        return float("nan")
+
+
+# ---------------------------------------------------------------------------
+# Gradient alignment (first ↔ last layer)
+# ---------------------------------------------------------------------------
+
+def compute_gradient_alignment(
+    mean_grad_vec: "dict[str, torch.Tensor | None]",
+) -> float:
+    """Cosine similarity between the first and last linear layer's mean
+    gradient directions.
+
+    A value near +1 means both ends of the network are pushing in the same
+    direction — a healthy, end-to-end cooperative update.  Values near 0
+    indicate orthogonal updates (the layers are learning independently), and
+    negative values suggest gradient reversal (the two ends are fighting each
+    other), which is a warning sign of vanishing or exploding gradient flow.
+
+    Parameters
+    ----------
+    mean_grad_vec : dict mapping layer name → mean gradient tensor (or None)
+                    as returned by ``train_one_epoch``'s
+                    ``mean_grad_vec_per_layer`` key.  Must have at least two
+                    entries with non-None tensors.
+
+    Returns
+    -------
+    float
+        Cosine similarity in [-1, 1], or float('nan') if fewer than two
+        layers have valid gradient vectors.
+    """
+    try:
+        # Collect layers that have a valid (non-None) gradient vector.
+        valid = [
+            v for v in mean_grad_vec.values()
+            if v is not None
+        ]
+        if len(valid) < 2:
+            return float("nan")
+
+        first = valid[0].flatten()
+        last  = valid[-1].flatten()
+
+        # Cosine similarity requires matching dimensions only through the
+        # dot product — no reshaping needed as both are already 1-D.
+        cos_sim = torch.nn.functional.cosine_similarity(
+            first.unsqueeze(0), last.unsqueeze(0)
+        ).item()
+        return float(cos_sim)
+
+    except Exception:
+        return float("nan")
+
+
+# ---------------------------------------------------------------------------
+# Spectral norm of weight matrices
+# ---------------------------------------------------------------------------
+
+def compute_spectral_norm(model: "nn.Module") -> "dict[str, float]":
+    """Largest singular value σ_max(W) for each Linear layer's weight matrix.
+
+    The spectral norm is the tightest upper bound on how much a linear
+    transformation can stretch a vector — it equals the Lipschitz constant
+    of that layer.  High spectral norms can cause training instability and
+    are particularly relevant for understanding gradient explosion.
+
+    Uses ``torch.linalg.svdvals`` on a CPU float32 copy of each weight
+    matrix (same device-agnostic pattern as ``compute_weight_rank``).
+
+    Parameters
+    ----------
+    model : nn.Module — any module; only ``nn.Linear`` submodules are
+            inspected.
+
+    Returns
+    -------
+    dict[str, float]
+        Mapping from layer name (from ``named_modules``) to σ_max ≥ 0.
+        Empty dict if the model has no Linear layers.  Returns float('nan')
+        for a specific layer if SVD fails.
+    """
+    result: dict[str, float] = {}
+    try:
+        for name, mod in model.named_modules():
+            if isinstance(mod, nn.Linear):
+                try:
+                    # Compute on CPU float32 for numerical stability and
+                    # device independence (same pattern as weight rank).
+                    W_cpu = mod.weight.detach().float().cpu()
+                    sv = torch.linalg.svdvals(W_cpu)
+                    result[name] = float(sv[0].item())
+                except Exception:
+                    result[name] = float("nan")
+    except Exception:
+        pass
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Optimizer state entropy
+# ---------------------------------------------------------------------------
+
+def compute_optimizer_state_entropy(optimizer: "torch.optim.Optimizer") -> float:
+    """Shannon entropy of the momentum / variance buffers across all parameters.
+
+    Inspects the optimizer's ``state_dict()`` for buffer tensors
+    (``exp_avg``, ``exp_avg_sq``, ``momentum_buffer``, ``m``, ``v``,
+    ``exp_avg_sq_row``, ``exp_avg_sq_col``).  All found buffers are
+    flattened, concatenated, converted to probabilities via ``softmax``,
+    and their Shannon entropy is returned in nats.
+
+    Interpretation
+    --------------
+    High entropy  → the buffers are spread across many different values,
+                    meaning the optimizer is still actively exploring the
+                    loss landscape.
+    Low entropy   → the buffers have concentrated (many near-zero, a few
+                    dominating) which is typical of convergence or collapse.
+
+    Parameters
+    ----------
+    optimizer : torch.optim.Optimizer — any optimizer that stores
+                first/second moment tensors in ``param_groups`` state.
+
+    Returns
+    -------
+    float
+        Shannon entropy in nats ≥ 0, or float('nan') if no buffers are found.
+    """
+    # Keys used by common optimizers for their moment buffers.
+    _BUFFER_KEYS = {
+        "exp_avg",        # Adam, AdamW, NAdam, RAdam, Lion, Adan, ...
+        "exp_avg_sq",     # Adam, AdamW, NAdam, RAdam, ...
+        "momentum_buffer",# SGDMomentum
+        "m",              # Tiger, custom
+        "v",              # custom
+        "exp_avg_sq_row", # AdaFactor (factored second moment rows)
+        "exp_avg_sq_col", # AdaFactor (factored second moment cols)
+    }
+    try:
+        fragments: list[torch.Tensor] = []
+        state = optimizer.state_dict()["state"]
+        for param_state in state.values():
+            for key, val in param_state.items():
+                if key in _BUFFER_KEYS and isinstance(val, torch.Tensor):
+                    fragments.append(val.detach().float().cpu().reshape(-1))
+
+        if not fragments:
+            return float("nan")
+
+        # Concatenate all buffers, compute softmax probabilities, then
+        # Shannon entropy H = -Σ p_i · log(p_i).
+        all_vals = torch.cat(fragments)
+        # Take absolute values so negative momenta are treated symmetrically,
+        # then normalise to a probability distribution via softmax.
+        probs = torch.softmax(all_vals.abs(), dim=0)
+        # Clamp to avoid log(0); probs are already in (0,1] after softmax.
+        entropy = -(probs * probs.clamp(min=1e-10).log()).sum().item()
+        return float(entropy)
+
+    except Exception:
+        return float("nan")

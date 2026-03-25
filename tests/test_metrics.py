@@ -1,5 +1,6 @@
 """Tests for metrics.py — Hessian trace, sharpness, dead neurons, weight rank,
-gradient noise scale, and Fisher trace estimators."""
+gradient noise scale, Fisher trace, plasticity score, gradient alignment,
+spectral norm, and optimizer state entropy estimators."""
 
 import math
 import torch
@@ -7,7 +8,9 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from metrics import (compute_hessian_trace, compute_sharpness,
                      compute_dead_neurons, compute_weight_rank,
-                     compute_gradient_noise_scale, compute_fisher_trace)
+                     compute_gradient_noise_scale, compute_fisher_trace,
+                     compute_plasticity_score, compute_gradient_alignment,
+                     compute_spectral_norm, compute_optimizer_state_entropy)
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +287,216 @@ class TestFisherTrace:
         for p in model.parameters():
             if p.grad is not None:
                 assert (p.grad == 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Plasticity score
+# ---------------------------------------------------------------------------
+
+class TestPlasticityScore:
+    def test_returns_float(self):
+        model, _, criterion, device = tiny_model_and_batch()
+        loader = tiny_loader()
+        result = compute_plasticity_score(model, loader, loader, criterion, device, n_epochs=1)
+        assert isinstance(result, float)
+
+    def test_in_zero_one_range(self):
+        """Recovery accuracy must be in [0, 1]."""
+        model, _, criterion, device = tiny_model_and_batch()
+        loader = tiny_loader()
+        result = compute_plasticity_score(model, loader, loader, criterion, device, n_epochs=1)
+        if not math.isnan(result):
+            assert 0.0 <= result <= 1.0
+
+    def test_original_model_unchanged(self):
+        """compute_plasticity_score must not modify the original model weights."""
+        model, _, criterion, device = tiny_model_and_batch()
+        loader = tiny_loader()
+        weights_before = [p.data.clone() for p in model.parameters()]
+        compute_plasticity_score(model, loader, loader, criterion, device, n_epochs=1)
+        for before, p in zip(weights_before, model.parameters()):
+            assert torch.allclose(before, p.data), "Original model weights were modified"
+
+    def test_no_linear_returns_nan(self):
+        """A model with no Linear layers should return NaN gracefully."""
+        model = nn.Sequential(nn.Flatten(), nn.ReLU())
+        criterion = nn.CrossEntropyLoss()
+        loader = tiny_loader()
+        result = compute_plasticity_score(model, loader, loader, criterion,
+                                          torch.device("cpu"), n_epochs=1)
+        assert math.isnan(result)
+
+    def test_finite_on_valid_model(self):
+        """Standard tiny model should give a finite score."""
+        model, _, criterion, device = tiny_model_and_batch()
+        loader = tiny_loader()
+        result = compute_plasticity_score(model, loader, loader, criterion, device, n_epochs=2)
+        assert math.isfinite(result)
+
+
+# ---------------------------------------------------------------------------
+# Gradient alignment
+# ---------------------------------------------------------------------------
+
+class TestGradientAlignment:
+    def _make_grad_vec(self, *shapes):
+        """Return a mean_grad_vec dict with random tensors for given shapes."""
+        names = [f"layer_{i}" for i in range(len(shapes))]
+        return {name: torch.randn(*shape) for name, shape in zip(names, shapes)}
+
+    def test_returns_float(self):
+        gv = self._make_grad_vec((4, 8), (2, 4))
+        result = compute_gradient_alignment(gv)
+        assert isinstance(result, float)
+
+    def test_value_in_range(self):
+        """Cosine similarity must be in [-1, 1]."""
+        gv = self._make_grad_vec((4, 8), (2, 4))
+        result = compute_gradient_alignment(gv)
+        if not math.isnan(result):
+            assert -1.0 - 1e-6 <= result <= 1.0 + 1e-6
+
+    def test_identical_vectors_gives_one(self):
+        """If first and last layer have identical gradient vectors, similarity = 1."""
+        v = torch.ones(4, 8)
+        gv = {"layer_0": v, "layer_1": v}
+        result = compute_gradient_alignment(gv)
+        assert abs(result - 1.0) < 1e-5
+
+    def test_opposite_vectors_gives_minus_one(self):
+        """If last layer grad is the negation of the first, similarity = -1."""
+        v = torch.ones(4, 8)
+        gv = {"layer_0": v, "layer_1": -v}
+        result = compute_gradient_alignment(gv)
+        assert abs(result + 1.0) < 1e-5
+
+    def test_single_layer_returns_nan(self):
+        """Only one layer with valid grad → cannot compare first vs last → NaN."""
+        gv = {"layer_0": torch.randn(4, 8), "layer_1": None}
+        result = compute_gradient_alignment(gv)
+        assert math.isnan(result)
+
+    def test_empty_dict_returns_nan(self):
+        """Empty grad dict → NaN."""
+        result = compute_gradient_alignment({})
+        assert math.isnan(result)
+
+
+# ---------------------------------------------------------------------------
+# Spectral norm
+# ---------------------------------------------------------------------------
+
+class TestSpectralNorm:
+    def test_returns_dict(self):
+        model, _, _, _ = tiny_model_and_batch()
+        result = compute_spectral_norm(model)
+        assert isinstance(result, dict)
+
+    def test_keys_are_linear_layers(self):
+        model, _, _, _ = tiny_model_and_batch()
+        result = compute_spectral_norm(model)
+        linear_names = {name for name, mod in model.named_modules()
+                        if isinstance(mod, nn.Linear)}
+        assert set(result.keys()) == linear_names
+
+    def test_non_negative(self):
+        """Largest singular value must be ≥ 0."""
+        model, _, _, _ = tiny_model_and_batch()
+        result = compute_spectral_norm(model)
+        for name, sigma in result.items():
+            if not math.isnan(sigma):
+                assert sigma >= 0.0, f"{name}: sigma={sigma} < 0"
+
+    def test_rank_one_spectral_norm(self):
+        """σ_max of a rank-1 matrix u·v^T equals ||u||·||v|| / ||u||·||v||... = ||w||₂ norm."""
+        # For a rank-1 matrix W = u·v^T, σ_max = ||u||_2 · ||v||_2.
+        model = nn.Linear(4, 4, bias=False)
+        u = torch.randn(4)
+        v = torch.randn(4)
+        with torch.no_grad():
+            model.weight.data = u.unsqueeze(1) * v.unsqueeze(0)
+        expected = u.norm().item() * v.norm().item()
+        result = compute_spectral_norm(model)
+        sigma = list(result.values())[0]
+        assert abs(sigma - expected) < 1e-3, f"Expected σ_max≈{expected:.4f}, got {sigma:.4f}"
+
+    def test_empty_model_returns_empty(self):
+        """A model with no Linear layers returns empty dict."""
+        model = nn.Sequential(nn.ReLU())
+        result = compute_spectral_norm(model)
+        assert result == {}
+
+    def test_values_finite(self):
+        """Spectral norms should be finite for a randomly initialised model."""
+        model, _, _, _ = tiny_model_and_batch()
+        result = compute_spectral_norm(model)
+        for name, sigma in result.items():
+            assert math.isfinite(sigma), f"{name}: sigma={sigma} is not finite"
+
+
+# ---------------------------------------------------------------------------
+# Optimizer state entropy
+# ---------------------------------------------------------------------------
+
+class TestOptimizerStateEntropy:
+    def _adam_with_state(self):
+        """Return an Adam optimizer that has taken at least one step (has state)."""
+        model = nn.Linear(8, 4)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        # One forward + backward + step to populate the state buffers.
+        loss = model(torch.randn(4, 8)).sum()
+        loss.backward()
+        opt.step()
+        return opt
+
+    def test_returns_float(self):
+        opt = self._adam_with_state()
+        result = compute_optimizer_state_entropy(opt)
+        assert isinstance(result, float)
+
+    def test_non_negative(self):
+        """Entropy is always ≥ 0."""
+        opt = self._adam_with_state()
+        result = compute_optimizer_state_entropy(opt)
+        if not math.isnan(result):
+            assert result >= 0.0
+
+    def test_finite_for_adam(self):
+        """Adam buffers should give a finite entropy."""
+        opt = self._adam_with_state()
+        result = compute_optimizer_state_entropy(opt)
+        assert math.isfinite(result)
+
+    def test_no_state_returns_nan(self):
+        """An optimizer that has never stepped has no state → NaN."""
+        model = nn.Linear(4, 2)
+        opt = torch.optim.Adam(model.parameters())
+        result = compute_optimizer_state_entropy(opt)
+        assert math.isnan(result)
+
+    def test_entropy_decreases_with_concentrated_state(self):
+        """Entropy of nearly uniform buffers > entropy of a single spike."""
+        # Two 1-parameter models: one near-uniform state, one concentrated.
+        model_uniform = nn.Linear(8, 8, bias=False)
+        with torch.no_grad():
+            model_uniform.weight.fill_(1.0)
+        opt_uniform = torch.optim.Adam(model_uniform.parameters(), lr=1e-3)
+        loss = model_uniform(torch.ones(4, 8)).sum()
+        loss.backward()
+        opt_uniform.step()
+        ent_uniform = compute_optimizer_state_entropy(opt_uniform)
+
+        model_spike = nn.Linear(8, 8, bias=False)
+        with torch.no_grad():
+            model_spike.weight.zero_()
+            model_spike.weight[0, 0] = 1e6   # one very large gradient component
+        opt_spike = torch.optim.Adam(model_spike.parameters(), lr=1e-3)
+        g = torch.zeros_like(model_spike.weight)
+        g[0, 0] = 1e6
+        loss_spike = (model_spike.weight * g).sum()
+        loss_spike.backward()
+        opt_spike.step()
+        ent_spike = compute_optimizer_state_entropy(opt_spike)
+
+        # Uniform buffers should have higher entropy than a single spike.
+        assert ent_uniform > ent_spike

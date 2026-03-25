@@ -1825,3 +1825,206 @@ class TestFisherTraceIntegration:
         history = self._run(track=True)
         for v in history["fisher_trace"]:
             assert v >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Gradient accumulation
+# ---------------------------------------------------------------------------
+
+class TestGradientAccumulation:
+    """Tests for the accum_steps parameter in train_one_epoch / run_training."""
+
+    def _setup(self, n_samples=64, batch_size=16):
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[32]).to(torch.device("cpu"))
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(n_samples, 1, 28, 28)
+        y = torch.randint(0, 10, (n_samples,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=batch_size)
+        names = linear_layer_names(model)
+        return model, optimizer, criterion, torch.device("cpu"), loader, names
+
+    def test_return_keys_unchanged(self):
+        """accum_steps should not add or remove keys from the return dict."""
+        model, opt, crit, dev, loader, names = self._setup()
+        result = train_one_epoch(model, loader, opt, crit, dev, names, accum_steps=2)
+        assert set(result.keys()) == {
+            "loss", "acc", "grad_norms_per_layer",
+            "grad_norm_global", "grad_norm_std", "grad_norm_before_clip", "step_losses",
+            "grad_snr_per_layer", "mean_grad_vec_per_layer", "grad_noise_scale",
+        }
+
+    def test_loss_is_finite(self):
+        """Accumulated gradient training should still produce finite loss."""
+        model, opt, crit, dev, loader, names = self._setup()
+        result = train_one_epoch(model, loader, opt, crit, dev, names, accum_steps=4)
+        assert _math.isfinite(result["loss"])
+
+    def test_accum_steps_1_equals_default(self):
+        """accum_steps=1 should be identical to calling without the parameter."""
+        torch.manual_seed(42)
+        model1, opt1, crit, dev, loader, names = self._setup()
+        torch.manual_seed(42)
+        model2, opt2, _, _, _, _ = self._setup()
+        torch.manual_seed(0)
+        r1 = train_one_epoch(model1, loader, opt1, crit, dev, names, accum_steps=1)
+        torch.manual_seed(0)
+        r2 = train_one_epoch(model2, loader, opt2, crit, dev, names)
+        assert abs(r1["loss"] - r2["loss"]) < 1e-5
+
+    def test_weights_change_with_accumulation(self):
+        """Weights must be different after training with accum_steps > 1."""
+        model, opt, crit, dev, loader, names = self._setup()
+        weights_before = [p.data.clone() for p in model.parameters()]
+        train_one_epoch(model, loader, opt, crit, dev, names, accum_steps=2)
+        weights_after = [p.data.clone() for p in model.parameters()]
+        any_changed = any(
+            not torch.allclose(b, a)
+            for b, a in zip(weights_before, weights_after)
+        )
+        assert any_changed, "Weights did not change after accumulated training step"
+
+    def test_run_training_accepts_accum_steps(self):
+        """run_training should propagate accum_steps without error."""
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(32, 1, 28, 28)
+        y = torch.randint(0, 10, (32,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=8)
+        names = linear_layer_names(model)
+        history = run_training(model, loader, loader, optimizer, criterion,
+                               torch.device("cpu"), 2, names, verbose=False,
+                               accum_steps=4)
+        assert len(history["train_loss"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Gradient alignment (run_training integration)
+# ---------------------------------------------------------------------------
+
+class TestGradAlignmentIntegration:
+    def _run(self):
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(64, 1, 28, 28)
+        y = torch.randint(0, 10, (64,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=32)
+        return run_training(model, loader, loader, optimizer, criterion,
+                            torch.device("cpu"), 3, linear_layer_names(model),
+                            verbose=False)
+
+    def test_key_present(self):
+        history = self._run()
+        assert "grad_alignment" in history
+
+    def test_length_matches_epochs(self):
+        history = self._run()
+        assert len(history["grad_alignment"]) == 3
+
+    def test_values_in_range_or_nan(self):
+        history = self._run()
+        for v in history["grad_alignment"]:
+            if not _math.isnan(v):
+                assert -1.0 - 1e-6 <= v <= 1.0 + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Spectral norm (run_training integration)
+# ---------------------------------------------------------------------------
+
+class TestSpectralNormIntegration:
+    def _run(self, track=False):
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(32, 1, 28, 28)
+        y = torch.randint(0, 10, (32,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=16)
+        return run_training(model, loader, loader, optimizer, criterion,
+                            torch.device("cpu"), 2, linear_layer_names(model),
+                            verbose=False, track_spectral_norm=track)
+
+    def test_empty_when_disabled(self):
+        history = self._run(track=False)
+        assert history["spectral_norm"] == {}
+
+    def test_populated_when_enabled(self):
+        history = self._run(track=True)
+        assert len(history["spectral_norm"]) > 0
+
+    def test_values_non_negative(self):
+        history = self._run(track=True)
+        for layer, vals in history["spectral_norm"].items():
+            for v in vals:
+                if not _math.isnan(v):
+                    assert v >= 0.0, f"{layer}: σ_max={v} < 0"
+
+
+# ---------------------------------------------------------------------------
+# Optimizer state entropy (run_training integration)
+# ---------------------------------------------------------------------------
+
+class TestOptimizerEntropyIntegration:
+    def _run(self, track=False):
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(32, 1, 28, 28)
+        y = torch.randint(0, 10, (32,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=16)
+        return run_training(model, loader, loader, optimizer, criterion,
+                            torch.device("cpu"), 2, linear_layer_names(model),
+                            verbose=False, track_optimizer_entropy=track)
+
+    def test_all_nan_when_disabled(self):
+        history = self._run(track=False)
+        assert all(_math.isnan(v) for v in history["optimizer_state_entropy"])
+
+    def test_finite_when_enabled(self):
+        history = self._run(track=True)
+        for v in history["optimizer_state_entropy"]:
+            assert _math.isfinite(v)
+
+    def test_non_negative_when_enabled(self):
+        history = self._run(track=True)
+        for v in history["optimizer_state_entropy"]:
+            assert v >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Plasticity score (run_training integration)
+# ---------------------------------------------------------------------------
+
+class TestPlasticityIntegration:
+    def _run(self, interval=0):
+        model = build_model("mlp", DATASET_INFO["mnist"], hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(32, 1, 28, 28)
+        y = torch.randint(0, 10, (32,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=16)
+        return run_training(model, loader, loader, optimizer, criterion,
+                            torch.device("cpu"), 4, linear_layer_names(model),
+                            verbose=False, plasticity_interval=interval)
+
+    def test_all_nan_when_disabled(self):
+        history = self._run(interval=0)
+        assert all(_math.isnan(v) for v in history["plasticity"])
+
+    def test_measured_at_correct_epochs(self):
+        """With interval=2, only epochs 2 and 4 should be non-NaN."""
+        history = self._run(interval=2)
+        ps = history["plasticity"]
+        # Indices 0, 1, 2, 3 → epochs 1, 2, 3, 4
+        assert _math.isnan(ps[0])   # epoch 1 — not measured
+        assert not _math.isnan(ps[1])  # epoch 2 — measured
+        assert _math.isnan(ps[2])   # epoch 3 — not measured
+        assert not _math.isnan(ps[3])  # epoch 4 — measured
+
+    def test_values_in_range(self):
+        history = self._run(interval=2)
+        for v in history["plasticity"]:
+            if not _math.isnan(v):
+                assert 0.0 <= v <= 1.0

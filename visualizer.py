@@ -2324,3 +2324,360 @@ def plot_fisher_trace(
         print(f"\n  Fisher trace figure saved to {save_path}")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Gradient alignment (first ↔ last layer cosine similarity)
+# ---------------------------------------------------------------------------
+
+def plot_grad_alignment(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict,
+    save_path: str | None = "plots/grad_alignment.png",
+) -> None:
+    """Plot per-epoch cosine similarity between the first and last linear
+    layer gradient directions.
+
+    Values near +1 indicate end-to-end cooperative updates; near -1 suggest
+    gradient reversal.  NaN points (e.g. epoch 1 or single-layer models) are
+    silently omitted.  The y-axis is fixed to [-1.05, 1.05] with a dashed
+    zero reference line for easy interpretation.
+
+    Parameters
+    ----------
+    results        : dict mapping (dataset, model, series) → history
+    dataset_names  : list of dataset display names to include
+    model_names    : list of model names to include
+    optimizer_names: list of series names to include
+    opt_colors     : {series_name: color_str}
+    save_path      : file path to save the figure (None = do not save)
+    """
+    n_ds  = len(dataset_names)
+    n_mdl = len(model_names)
+    fig, axes = plt.subplots(n_ds, n_mdl, figsize=(6 * n_mdl, 4 * n_ds),
+                             squeeze=False)
+    fig.suptitle("Gradient Alignment (first ↔ last layer cosine similarity)",
+                 fontsize=13, fontweight="bold")
+
+    for row, ds in enumerate(dataset_names):
+        for col, mdl in enumerate(model_names):
+            ax = axes[row][col]
+            ax.set_title(f"{ds} / {mdl}", fontsize=10)
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Cosine similarity")
+            ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+            ax.set_ylim(-1.05, 1.05)
+
+            for opt_name in optimizer_names:
+                key = (ds, mdl, opt_name)
+                if key not in results:
+                    continue
+                vals = results[key].get("grad_alignment", [])
+                if not vals:
+                    continue
+                # Filter out NaN points
+                epochs = [i + 1 for i, v in enumerate(vals)
+                          if not (isinstance(v, float) and v != v)]
+                valid  = [v for v in vals
+                          if not (isinstance(v, float) and v != v)]
+                if not epochs:
+                    continue
+                color = opt_colors.get(opt_name, "#333333")
+                ax.plot(epochs, valid, color=color, label=opt_name,
+                        linewidth=1.8, marker="o", markersize=4)
+
+                # Error bands if multi-seed std is present
+                std_vals = results[key].get("grad_alignment_std", [])
+                if std_vals:
+                    std_valid = [std_vals[i - 1] for i in epochs
+                                 if (i - 1) < len(std_vals)]
+                    valid_np  = [valid[k] for k in range(len(epochs))]
+                    if len(std_valid) == len(valid_np):
+                        ax.fill_between(
+                            epochs,
+                            [v - s for v, s in zip(valid_np, std_valid)],
+                            [v + s for v, s in zip(valid_np, std_valid)],
+                            alpha=0.15, color=color,
+                        )
+
+            ax.legend(fontsize=8)
+            ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Gradient alignment figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Spectral norm (σ_max per layer per epoch)
+# ---------------------------------------------------------------------------
+
+def plot_spectral_norm(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict,
+    save_path: str | None = "plots/spectral_norm.png",
+) -> None:
+    """Plot per-epoch largest singular value (σ_max) averaged across all
+    Linear layers for each optimizer.
+
+    High spectral norm = potentially unstable layer (large Lipschitz constant).
+    Declining spectral norm across epochs suggests progressive regularisation.
+
+    Parameters
+    ----------
+    results        : dict mapping (dataset, model, series) → history
+    dataset_names  : list of dataset display names to include
+    model_names    : list of model names to include
+    optimizer_names: list of series names to include
+    opt_colors     : {series_name: color_str}
+    save_path      : file path to save the figure (None = do not save)
+    """
+    import math as _math
+
+    n_ds  = len(dataset_names)
+    n_mdl = len(model_names)
+    fig, axes = plt.subplots(n_ds, n_mdl, figsize=(6 * n_mdl, 4 * n_ds),
+                             squeeze=False)
+    fig.suptitle("Spectral Norm σ_max(W) — mean across Linear layers",
+                 fontsize=13, fontweight="bold")
+
+    for row, ds in enumerate(dataset_names):
+        for col, mdl in enumerate(model_names):
+            ax = axes[row][col]
+            ax.set_title(f"{ds} / {mdl}", fontsize=10)
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("σ_max (mean over layers)")
+
+            for opt_name in optimizer_names:
+                key = (ds, mdl, opt_name)
+                if key not in results:
+                    continue
+                sn_dict = results[key].get("spectral_norm", {})
+                if not sn_dict:
+                    continue
+
+                # Average σ_max across all layers per epoch.
+                num_epochs = max(len(v) for v in sn_dict.values())
+                avg_vals = []
+                for ep_idx in range(num_epochs):
+                    ep_vals = [
+                        v[ep_idx] for v in sn_dict.values()
+                        if ep_idx < len(v) and not _math.isnan(v[ep_idx])
+                    ]
+                    avg_vals.append(
+                        sum(ep_vals) / len(ep_vals) if ep_vals else float("nan")
+                    )
+
+                epochs = list(range(1, num_epochs + 1))
+                color  = opt_colors.get(opt_name, "#333333")
+                valid_e = [e for e, v in zip(epochs, avg_vals)
+                           if not _math.isnan(v)]
+                valid_v = [v for v in avg_vals if not _math.isnan(v)]
+                if valid_e:
+                    ax.plot(valid_e, valid_v, color=color, label=opt_name,
+                            linewidth=1.8, marker="o", markersize=4)
+
+            ax.legend(fontsize=8)
+            ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Spectral norm figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Optimizer state entropy
+# ---------------------------------------------------------------------------
+
+def plot_optimizer_state_entropy(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict,
+    save_path: str | None = "plots/optimizer_entropy.png",
+) -> None:
+    """Plot per-epoch Shannon entropy of the optimizer's momentum/variance
+    buffers.
+
+    High entropy indicates the optimizer is still exploring; entropy collapse
+    near convergence is a useful early-stopping signal and a sign that the
+    model has settled into a local minimum.
+
+    NaN epochs (disabled or unsupported optimizers) are silently skipped.
+    Error bands are shown when multi-seed std data is available.
+
+    Parameters
+    ----------
+    results        : dict mapping (dataset, model, series) → history
+    dataset_names  : list of dataset display names to include
+    model_names    : list of model names to include
+    optimizer_names: list of series names to include
+    opt_colors     : {series_name: color_str}
+    save_path      : file path to save the figure (None = do not save)
+    """
+    import math as _math
+
+    n_ds  = len(dataset_names)
+    n_mdl = len(model_names)
+    fig, axes = plt.subplots(n_ds, n_mdl, figsize=(6 * n_mdl, 4 * n_ds),
+                             squeeze=False)
+    fig.suptitle("Optimizer State Entropy (Shannon entropy of momentum/variance buffers)",
+                 fontsize=13, fontweight="bold")
+
+    for row, ds in enumerate(dataset_names):
+        for col, mdl in enumerate(model_names):
+            ax = axes[row][col]
+            ax.set_title(f"{ds} / {mdl}", fontsize=10)
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Entropy (nats)")
+
+            for opt_name in optimizer_names:
+                key = (ds, mdl, opt_name)
+                if key not in results:
+                    continue
+                vals = results[key].get("optimizer_state_entropy", [])
+                if not vals:
+                    continue
+                # Skip series that are all-NaN (optimizer has no state buffers).
+                if all(_math.isnan(v) for v in vals if isinstance(v, float)):
+                    continue
+                epochs = [i + 1 for i, v in enumerate(vals)
+                          if not (isinstance(v, float) and _math.isnan(v))]
+                valid  = [v for v in vals
+                          if not (isinstance(v, float) and _math.isnan(v))]
+                if not epochs:
+                    continue
+                color = opt_colors.get(opt_name, "#333333")
+                ax.plot(epochs, valid, color=color, label=opt_name,
+                        linewidth=1.8, marker="o", markersize=4)
+
+                std_vals = results[key].get("optimizer_state_entropy_std", [])
+                if std_vals:
+                    std_valid = [std_vals[i - 1] for i in epochs
+                                 if (i - 1) < len(std_vals)]
+                    if len(std_valid) == len(valid):
+                        ax.fill_between(
+                            epochs,
+                            [v - s for v, s in zip(valid, std_valid)],
+                            [v + s for v, s in zip(valid, std_valid)],
+                            alpha=0.15, color=color,
+                        )
+
+            ax.legend(fontsize=8)
+            ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Optimizer state entropy figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Plasticity score
+# ---------------------------------------------------------------------------
+
+def plot_plasticity(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict,
+    save_path: str | None = "plots/plasticity.png",
+) -> None:
+    """Plot per-epoch plasticity score (recovery accuracy after last-layer
+    reset + brief fine-tuning).
+
+    Epochs where the plasticity test was not run (NaN values) are omitted,
+    producing a sparse x-axis tick pattern when ``plasticity_interval > 1``.
+    A score near the network's test accuracy means the model is still fully
+    plastic; a score that is much lower indicates the representations have
+    become rigid (loss of plasticity).
+
+    Parameters
+    ----------
+    results        : dict mapping (dataset, model, series) → history
+    dataset_names  : list of dataset display names to include
+    model_names    : list of model names to include
+    optimizer_names: list of series names to include
+    opt_colors     : {series_name: color_str}
+    save_path      : file path to save the figure (None = do not save)
+    """
+    import math as _math
+
+    n_ds  = len(dataset_names)
+    n_mdl = len(model_names)
+    fig, axes = plt.subplots(n_ds, n_mdl, figsize=(6 * n_mdl, 4 * n_ds),
+                             squeeze=False)
+    fig.suptitle("Plasticity Score (last-layer reset recovery accuracy)",
+                 fontsize=13, fontweight="bold")
+
+    for row, ds in enumerate(dataset_names):
+        for col, mdl in enumerate(model_names):
+            ax = axes[row][col]
+            ax.set_title(f"{ds} / {mdl}", fontsize=10)
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Recovery accuracy")
+            ax.set_ylim(0.0, 1.05)
+
+            for opt_name in optimizer_names:
+                key = (ds, mdl, opt_name)
+                if key not in results:
+                    continue
+                vals = results[key].get("plasticity", [])
+                if not vals:
+                    continue
+                # Filter out NaN epochs (where score was not measured).
+                epochs = [i + 1 for i, v in enumerate(vals)
+                          if not (isinstance(v, float) and _math.isnan(v))]
+                valid  = [v for v in vals
+                          if not (isinstance(v, float) and _math.isnan(v))]
+                if not epochs:
+                    continue
+                color = opt_colors.get(opt_name, "#333333")
+                ax.plot(epochs, valid, color=color, label=opt_name,
+                        linewidth=1.8, marker="o", markersize=6)
+
+                std_vals = results[key].get("plasticity_std", [])
+                if std_vals:
+                    std_valid = [std_vals[i - 1] for i in epochs
+                                 if (i - 1) < len(std_vals)]
+                    if len(std_valid) == len(valid):
+                        ax.fill_between(
+                            epochs,
+                            [max(0, v - s) for v, s in zip(valid, std_valid)],
+                            [min(1, v + s) for v, s in zip(valid, std_valid)],
+                            alpha=0.15, color=color,
+                        )
+
+            ax.legend(fontsize=8)
+            ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Plasticity score figure saved to {save_path}")
+
+    plt.show()

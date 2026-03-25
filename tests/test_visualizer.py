@@ -10,7 +10,9 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
                         _compute_lr_sensitivity, plot_weight_distance, plot_hp_heatmap,
                         plot_grad_snr, plot_class_accuracy, plot_instability, plot_step_size,
                         plot_sharpness, plot_grad_cosine_sim,
-                        plot_grad_conflict, plot_lr_sensitivity_curves)
+                        plot_grad_conflict, plot_lr_sensitivity_curves,
+                        plot_grad_alignment, plot_spectral_norm,
+                        plot_optimizer_state_entropy, plot_plasticity)
 
 
 # ---------------------------------------------------------------------------
@@ -1112,3 +1114,162 @@ class TestLrSensitivityCurvesPlot:
         """Results without config_lr keys produce no error."""
         results = {("MNIST", "MLP", "Adam"): {"train_loss": [0.5], "test_acc": [0.8]}}
         plot_lr_sensitivity_curves(results, save_path=None)
+
+
+# ---------------------------------------------------------------------------
+# plot_grad_alignment
+# ---------------------------------------------------------------------------
+
+class TestGradAlignmentPlot:
+    OPT_COLORS = {"Adam": "blue"}
+
+    def _make_results(self):
+        import math
+        return {
+            ("MNIST", "MLP", "Adam"): {
+                "grad_alignment": [float("nan"), 0.7, 0.8, 0.85],
+            }
+        }
+
+    def test_runs_without_error(self):
+        plot_grad_alignment(self._make_results(), ["MNIST"], ["MLP"], ["Adam"],
+                            self.OPT_COLORS, save_path=None)
+
+    def test_saves_file(self, tmp_path):
+        out = tmp_path / "grad_alignment.png"
+        plot_grad_alignment(self._make_results(), ["MNIST"], ["MLP"], ["Adam"],
+                            self.OPT_COLORS, save_path=str(out))
+        assert out.exists()
+
+    def test_all_nan_no_error(self):
+        """All-NaN alignment series should not crash."""
+        import math
+        results = {
+            ("MNIST", "MLP", "Adam"): {
+                "grad_alignment": [float("nan"), float("nan")],
+            }
+        }
+        plot_grad_alignment(results, ["MNIST"], ["MLP"], ["Adam"],
+                            self.OPT_COLORS, save_path=None)
+
+    def test_missing_key_no_error(self):
+        """Result dict missing the grad_alignment key should not crash."""
+        results = {("MNIST", "MLP", "Adam"): {"train_loss": [0.5, 0.4]}}
+        plot_grad_alignment(results, ["MNIST"], ["MLP"], ["Adam"],
+                            self.OPT_COLORS, save_path=None)
+
+
+# ---------------------------------------------------------------------------
+# plot_spectral_norm
+# ---------------------------------------------------------------------------
+
+class TestSpectralNormPlot:
+    OPT_COLORS = {"Adam": "green"}
+
+    def _make_results(self):
+        return {
+            ("MNIST", "MLP", "Adam"): {
+                "spectral_norm": {
+                    "1": [2.1, 2.0, 1.9],
+                    "3": [1.5, 1.4, 1.3],
+                }
+            }
+        }
+
+    def test_runs_without_error(self):
+        plot_spectral_norm(self._make_results(), ["MNIST"], ["MLP"], ["Adam"],
+                           self.OPT_COLORS, save_path=None)
+
+    def test_saves_file(self, tmp_path):
+        out = tmp_path / "spectral_norm.png"
+        plot_spectral_norm(self._make_results(), ["MNIST"], ["MLP"], ["Adam"],
+                           self.OPT_COLORS, save_path=str(out))
+        assert out.exists()
+
+    def test_empty_dict_no_error(self):
+        results = {("MNIST", "MLP", "Adam"): {"spectral_norm": {}}}
+        plot_spectral_norm(results, ["MNIST"], ["MLP"], ["Adam"],
+                           self.OPT_COLORS, save_path=None)
+
+
+# ---------------------------------------------------------------------------
+# plot_optimizer_state_entropy
+# ---------------------------------------------------------------------------
+
+class TestOptimizerStateEntropyPlot:
+    OPT_COLORS = {"Adam": "red"}
+
+    def _make_results(self):
+        return {
+            ("MNIST", "MLP", "Adam"): {
+                "optimizer_state_entropy": [5.2, 4.8, 4.3, 3.9],
+            }
+        }
+
+    def test_runs_without_error(self):
+        plot_optimizer_state_entropy(self._make_results(), ["MNIST"], ["MLP"],
+                                     ["Adam"], self.OPT_COLORS, save_path=None)
+
+    def test_saves_file(self, tmp_path):
+        out = tmp_path / "optimizer_entropy.png"
+        plot_optimizer_state_entropy(self._make_results(), ["MNIST"], ["MLP"],
+                                     ["Adam"], self.OPT_COLORS, save_path=str(out))
+        assert out.exists()
+
+    def test_all_nan_skipped_no_error(self):
+        """All-NaN entropy series (disabled optimizer) should not crash."""
+        import math
+        results = {
+            ("MNIST", "MLP", "Adam"): {
+                "optimizer_state_entropy": [float("nan"), float("nan")],
+            }
+        }
+        plot_optimizer_state_entropy(results, ["MNIST"], ["MLP"], ["Adam"],
+                                     self.OPT_COLORS, save_path=None)
+
+    def test_missing_key_no_error(self):
+        results = {("MNIST", "MLP", "Adam"): {"train_loss": [0.5]}}
+        plot_optimizer_state_entropy(results, ["MNIST"], ["MLP"], ["Adam"],
+                                     self.OPT_COLORS, save_path=None)
+
+
+# ---------------------------------------------------------------------------
+# plot_plasticity
+# ---------------------------------------------------------------------------
+
+class TestPlasticityPlot:
+    OPT_COLORS = {"Adam": "purple"}
+
+    def _make_results(self):
+        import math
+        return {
+            ("MNIST", "MLP", "Adam"): {
+                "plasticity": [float("nan"), 0.72, float("nan"), 0.68],
+            }
+        }
+
+    def test_runs_without_error(self):
+        plot_plasticity(self._make_results(), ["MNIST"], ["MLP"], ["Adam"],
+                        self.OPT_COLORS, save_path=None)
+
+    def test_saves_file(self, tmp_path):
+        out = tmp_path / "plasticity.png"
+        plot_plasticity(self._make_results(), ["MNIST"], ["MLP"], ["Adam"],
+                        self.OPT_COLORS, save_path=str(out))
+        assert out.exists()
+
+    def test_all_nan_no_error(self):
+        """All-NaN plasticity (interval=0) should not crash."""
+        import math
+        results = {
+            ("MNIST", "MLP", "Adam"): {
+                "plasticity": [float("nan"), float("nan")],
+            }
+        }
+        plot_plasticity(results, ["MNIST"], ["MLP"], ["Adam"],
+                        self.OPT_COLORS, save_path=None)
+
+    def test_missing_key_no_error(self):
+        results = {("MNIST", "MLP", "Adam"): {"train_loss": [0.5]}}
+        plot_plasticity(results, ["MNIST"], ["MLP"], ["Adam"],
+                        self.OPT_COLORS, save_path=None)

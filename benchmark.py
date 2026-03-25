@@ -64,7 +64,9 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
                         plot_sharpness, plot_grad_cosine_sim,
                         plot_grad_conflict, plot_lr_sensitivity_curves,
                         plot_dead_neurons, plot_weight_rank,
-                        plot_grad_noise_scale, plot_fisher_trace)
+                        plot_grad_noise_scale, plot_fisher_trace,
+                        plot_grad_alignment, plot_spectral_norm,
+                        plot_optimizer_state_entropy, plot_plasticity)
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +410,10 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         # Gradient noise scale and Fisher trace are scalars per epoch
         "grad_noise_scale",
         "fisher_trace",
+        # New scalar-per-epoch metrics
+        "grad_alignment",
+        "optimizer_state_entropy",
+        "plasticity",
     ]
     for key in list_keys:
         vals = [h.get(key) or [] for h in histories]
@@ -437,7 +443,7 @@ def _aggregate_histories(histories: list[dict]) -> dict:
 
     for key in ("weight_norms", "grad_norms", "weight_distance", "grad_snr",
                 "class_acc", "step_size", "grad_cosine_sim", "grad_conflict",
-                "dead_neurons", "weight_rank"):
+                "dead_neurons", "weight_rank", "spectral_norm"):
         dicts = [h.get(key, {}) for h in histories]
         all_subkeys: set = set()
         for d in dicts:
@@ -559,6 +565,10 @@ def run_benchmark(
     track_dead_neurons: bool = False,
     track_weight_rank: bool = False,
     track_fisher: bool = False,
+    track_spectral_norm: bool = False,
+    track_optimizer_entropy: bool = False,
+    plasticity_interval: int = 0,
+    accum_steps: int = 1,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -700,6 +710,10 @@ def run_benchmark(
                                 track_dead_neurons=track_dead_neurons,
                                 track_weight_rank=track_weight_rank,
                                 track_fisher=track_fisher,
+                                track_spectral_norm=track_spectral_norm,
+                                track_optimizer_entropy=track_optimizer_entropy,
+                                plasticity_interval=plasticity_interval,
+                                accum_steps=accum_steps,
                             )
                             seed_histories.append(history)
 
@@ -841,6 +855,22 @@ def parse_args():
                    help="Track Fisher information trace each epoch")
     p.add_argument("--save-fisher", default="plots/fisher_trace.png",
                    help="Path to save Fisher trace figure ('' to disable)")
+    p.add_argument("--spectral-norm", action="store_true",
+                   help="Track largest singular value σ_max(W) per Linear layer each epoch")
+    p.add_argument("--save-spectral-norm", default="plots/spectral_norm.png",
+                   help="Path to save spectral norm figure ('' to disable)")
+    p.add_argument("--optimizer-entropy", action="store_true",
+                   help="Track Shannon entropy of optimizer momentum/variance buffers each epoch")
+    p.add_argument("--save-optimizer-entropy", default="plots/optimizer_entropy.png",
+                   help="Path to save optimizer state entropy figure ('' to disable)")
+    p.add_argument("--plasticity-interval", type=int, default=0,
+                   help="Compute loss-of-plasticity score every N epochs (0 = disabled)")
+    p.add_argument("--save-plasticity", default="plots/plasticity.png",
+                   help="Path to save plasticity score figure ('' to disable)")
+    p.add_argument("--save-grad-alignment", default="plots/grad_alignment.png",
+                   help="Path to save gradient alignment figure ('' to disable)")
+    p.add_argument("--accum-steps", type=int, default=1,
+                   help="Gradient accumulation steps (simulate larger batch; default=1)")
     p.add_argument("--auto-lr", action="store_true",
                    help="Run a learning-rate range test (LR finder) before each "
                         "(optimizer, dataset, model) combination and use the found LR "
@@ -959,6 +989,10 @@ def main():
             track_dead_neurons=args.dead_neurons,
             track_weight_rank=args.weight_rank,
             track_fisher=args.fisher,
+            track_spectral_norm=args.spectral_norm,
+            track_optimizer_entropy=args.optimizer_entropy,
+            plasticity_interval=args.plasticity_interval,
+            accum_steps=args.accum_steps,
         )
         logger.close()
 
@@ -1054,6 +1088,26 @@ def main():
     if args.save_fisher and args.fisher:
         plot_fisher_trace(results, dataset_names, model_names, series_names,
                           opt_colors, save_path=args.save_fisher)
+
+    # ── Gradient Alignment ────────────────────────────────────────────────
+    if args.save_grad_alignment:
+        plot_grad_alignment(results, dataset_names, model_names, series_names,
+                            opt_colors, save_path=args.save_grad_alignment)
+
+    # ── Spectral Norm ─────────────────────────────────────────────────────
+    if args.save_spectral_norm and args.spectral_norm:
+        plot_spectral_norm(results, dataset_names, model_names, series_names,
+                           opt_colors, save_path=args.save_spectral_norm)
+
+    # ── Optimizer State Entropy ───────────────────────────────────────────
+    if args.save_optimizer_entropy and args.optimizer_entropy:
+        plot_optimizer_state_entropy(results, dataset_names, model_names, series_names,
+                                     opt_colors, save_path=args.save_optimizer_entropy)
+
+    # ── Plasticity Score ──────────────────────────────────────────────────
+    if args.save_plasticity and args.plasticity_interval > 0:
+        plot_plasticity(results, dataset_names, model_names, series_names,
+                        opt_colors, save_path=args.save_plasticity)
 
     # ── HP Robustness Heatmap ─────────────────────────────────────────────
     if (args.save_hp_heatmap

@@ -685,6 +685,7 @@ def train_one_epoch(
     scaler=None,
     ema_state: dict | None = None,
     ema_decay: float = 0.999,
+    accum_steps: int = 1,
 ) -> dict:
     """Run one training epoch and return per-epoch metrics.
 
@@ -708,6 +709,12 @@ def train_one_epoch(
                        in-place after each optimizer step using exponential moving
                        average: ema = ema * decay + param * (1 - decay)
     ema_decay        : EMA coefficient (only used when ema_state is not None)
+    accum_steps      : number of micro-batches to accumulate gradients over
+                       before calling optimizer.step().  accum_steps=1 (default)
+                       gives the standard per-batch update.  Values > 1 simulate
+                       a larger effective batch size without extra memory cost by
+                       dividing each micro-batch loss by accum_steps before
+                       backward so gradients sum to the correct scale.
 
     Returns
     -------
@@ -733,6 +740,8 @@ def train_one_epoch(
     # which is used upstream to compute cosine similarity between epochs.
     grad_vec_accum: dict[str, torch.Tensor | None] = {n: None for n in layer_names}
     num_batches = 0
+    # num_steps counts optimizer.step() calls (one per accum_steps micro-batches).
+    num_steps = 0
     step_losses: list[float] = []
     all_raw_norms: list[float] = []   # pre-clip per-param norms across all batches
     all_grad_norms: list[float] = []  # post-clip per-param norms across all batches
@@ -742,9 +751,14 @@ def train_one_epoch(
     _batch_global_norm_sq: list[float] = []   # ||g_batch||² per batch
     _global_grad_vec_accum: torch.Tensor | None = None  # sum of flat grad vectors
 
-    for images, labels in loader:
+    # Clamp accum_steps to at least 1 so callers can pass 0 safely.
+    _accum = max(1, accum_steps)
+
+    # zero_grad once before the very first micro-batch.
+    optimizer.zero_grad()
+
+    for batch_idx, (images, labels) in enumerate(loader):
         images, labels = images.to(device), labels.to(device)
-        optimizer.zero_grad()
 
         amp_ctx = (
             torch.autocast(device_type=device.type, dtype=torch.float16)
@@ -752,7 +766,9 @@ def train_one_epoch(
         )
         with amp_ctx:
             logits = model(images)
-            loss = criterion(logits, labels)
+            # Divide loss by accum_steps so gradients accumulate at the
+            # correct scale (equivalent to averaging over a larger batch).
+            loss = criterion(logits, labels) / _accum
 
         if getattr(optimizer, "requires_create_graph", False):
             # Use autograd.grad so gradients are differentiable graph nodes
@@ -763,97 +779,113 @@ def train_one_epoch(
             for p, g in zip(trainable, grads):
                 p.grad = g
         elif scaler is not None:
-            # CUDA AMP: scaled backward, then unscale so gradient norms are
-            # in full precision before we read or clip them.
+            # CUDA AMP: scaled backward; unscale happens at update step.
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
         else:
             loss.backward()
 
-        # Accumulate gradient norms and gradient vectors per linear layer.
-        # Norms: both sum and sum-of-squares for SNR = mean/std computation.
-        # Vectors: running sum of weight.grad tensors; divided by num_batches
-        # after the loop to give the mean gradient direction for this epoch.
-        idx = 0
-        for module in model.modules():
-            if isinstance(module, nn.Linear):
-                if module.weight.grad is not None:
-                    _g = module.weight.grad.detach()
-                    _gnorm = _g.norm().item()
-                    grad_accum[layer_names[idx]]    += _gnorm
-                    grad_sq_accum[layer_names[idx]] += _gnorm * _gnorm
-                    if grad_vec_accum[layer_names[idx]] is None:
-                        grad_vec_accum[layer_names[idx]] = _g.clone()
-                    else:
-                        grad_vec_accum[layer_names[idx]].add_(_g)
-                idx += 1
+        # Determine whether this is the last micro-batch of an accumulation
+        # window (or the last batch in the loader).
+        is_update_step = (
+            (batch_idx + 1) % _accum == 0
+            or (batch_idx + 1) == len(loader)
+        )
 
-        # Pre-clip global gradient norm for this batch
-        param_grad_norms = [
-            p.grad.norm().item()
-            for p in model.parameters()
-            if p.grad is not None
-        ]
-        all_raw_norms.extend(param_grad_norms)
+        if is_update_step:
+            # Unscale AMP gradients before reading norms or clipping.
+            if scaler is not None:
+                scaler.unscale_(optimizer)
 
-        # Accumulate for gradient noise scale using pre-clip gradients so the
-        # computation is consistent with grad_vec_accum (also pre-clip).
-        # _batch_global_norm_sq: one value per batch = sum of squared per-param norms
-        #   = ||g_batch||² (the global gradient norm squared for this batch)
-        # _global_grad_vec_accum: running sum of flat gradient vectors across batches
-        _batch_sq = sum(n * n for n in param_grad_norms)
-        _batch_global_norm_sq.append(_batch_sq)
-        # Build flat gradient vector for this batch
-        _flat_grads = [
-            p.grad.detach().reshape(-1)
-            for p in model.parameters()
-            if p.grad is not None
-        ]
-        if _flat_grads:
-            _flat = torch.cat(_flat_grads)
-            if _global_grad_vec_accum is None:
-                _global_grad_vec_accum = _flat.clone()
-            else:
-                _global_grad_vec_accum.add_(_flat)
+            # Accumulate gradient norms and gradient vectors per linear layer.
+            # Norms: both sum and sum-of-squares for SNR = mean/std computation.
+            # Vectors: running sum of weight.grad tensors; divided by num_steps
+            # after the loop to give the mean gradient direction for this epoch.
+            idx = 0
+            for module in model.modules():
+                if isinstance(module, nn.Linear):
+                    if module.weight.grad is not None:
+                        _g = module.weight.grad.detach()
+                        _gnorm = _g.norm().item()
+                        grad_accum[layer_names[idx]]    += _gnorm
+                        grad_sq_accum[layer_names[idx]] += _gnorm * _gnorm
+                        if grad_vec_accum[layer_names[idx]] is None:
+                            grad_vec_accum[layer_names[idx]] = _g.clone()
+                        else:
+                            grad_vec_accum[layer_names[idx]].add_(_g)
+                    idx += 1
 
-        if max_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            post_clip_norms = [
+            # Pre-clip global gradient norm for this accumulated step.
+            param_grad_norms = [
                 p.grad.norm().item()
                 for p in model.parameters()
                 if p.grad is not None
             ]
-            all_grad_norms.extend(post_clip_norms)
-        else:
-            all_grad_norms.extend(param_grad_norms)
+            all_raw_norms.extend(param_grad_norms)
 
-        if scaler is not None:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
+            # Accumulate for gradient noise scale using pre-clip gradients so
+            # the computation is consistent with grad_vec_accum (also pre-clip).
+            # _batch_global_norm_sq: one value per optimizer step = ||g_accum||²
+            # _global_grad_vec_accum: running sum of accumulated grad vectors
+            _batch_sq = sum(n * n for n in param_grad_norms)
+            _batch_global_norm_sq.append(_batch_sq)
+            _flat_grads = [
+                p.grad.detach().reshape(-1)
+                for p in model.parameters()
+                if p.grad is not None
+            ]
+            if _flat_grads:
+                _flat = torch.cat(_flat_grads)
+                if _global_grad_vec_accum is None:
+                    _global_grad_vec_accum = _flat.clone()
+                else:
+                    _global_grad_vec_accum.add_(_flat)
 
-        # EMA weight update (after every optimizer step)
-        if ema_state is not None:
-            with torch.no_grad():
-                for k, v in model.state_dict().items():
-                    if k in ema_state:
-                        ema_state[k].mul_(ema_decay).add_(v, alpha=1.0 - ema_decay)
+            if max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                post_clip_norms = [
+                    p.grad.norm().item()
+                    for p in model.parameters()
+                    if p.grad is not None
+                ]
+                all_grad_norms.extend(post_clip_norms)
+            else:
+                all_grad_norms.extend(param_grad_norms)
 
-        total_loss += loss.item() * images.size(0)
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+
+            # EMA weight update (after every optimizer step)
+            if ema_state is not None:
+                with torch.no_grad():
+                    for k, v in model.state_dict().items():
+                        if k in ema_state:
+                            ema_state[k].mul_(ema_decay).add_(v, alpha=1.0 - ema_decay)
+
+            # Zero gradients for the next accumulation window.
+            optimizer.zero_grad()
+            num_steps += 1
+
+        # Undo the loss / _accum scaling for logging (report raw batch loss).
+        total_loss += loss.item() * _accum * images.size(0)
         correct += (logits.argmax(dim=1) == labels).sum().item()
-        step_losses.append(loss.item())
+        step_losses.append(loss.item() * _accum)
         num_batches += 1
 
     n = len(loader.dataset)
-    avg_grad_norms = {name: total / num_batches for name, total in grad_accum.items()}
+    # Use num_steps (optimizer steps) as denominator for per-step averages;
+    # fall back to num_batches if no steps were taken (empty loader).
+    _denom = num_steps if num_steps > 0 else max(num_batches, 1)
+    avg_grad_norms = {name: total / _denom for name, total in grad_accum.items()}
 
     # Mean gradient vector per layer (for cosine similarity between epochs).
-    # Divide accumulated sum by number of batches; leave as None if no grad.
+    # Divide accumulated sum by number of optimizer steps; leave as None if no grad.
     mean_grad_vec: dict[str, torch.Tensor | None] = {}
     for name in layer_names:
         acc = grad_vec_accum[name]
-        mean_grad_vec[name] = (acc / num_batches) if (acc is not None and num_batches > 0) else None
+        mean_grad_vec[name] = (acc / _denom) if (acc is not None and _denom > 0) else None
 
     import statistics
     grad_norm_global = float(sum(g ** 2 for g in all_grad_norms) ** 0.5) if all_grad_norms else 0.0
@@ -1055,6 +1087,10 @@ def run_training(
     track_dead_neurons: bool = False,
     track_weight_rank: bool = False,
     track_fisher: bool = False,
+    track_spectral_norm: bool = False,
+    track_optimizer_entropy: bool = False,
+    plasticity_interval: int = 0,
+    accum_steps: int = 1,
 ) -> dict:
     """Train *model* for *epochs* and return a history dict.
 
@@ -1110,7 +1146,9 @@ def run_training(
     """
     from metrics import (compute_hessian_trace, compute_sharpness,
                          compute_dead_neurons, compute_weight_rank,
-                         compute_gradient_noise_scale, compute_fisher_trace)
+                         compute_gradient_noise_scale, compute_fisher_trace,
+                         compute_gradient_alignment, compute_spectral_norm,
+                         compute_optimizer_state_entropy, compute_plasticity_score)
 
     # ── AMP setup ──────────────────────────────────────────────────────────
     scaler = None
@@ -1229,6 +1267,20 @@ def run_training(
         # Fisher information trace per epoch: E[||∇_θ log p(y|x)||²].
         # NaN when track_fisher=False.
         "fisher_trace": [],
+        # Cosine similarity between the first and last Linear layer's mean
+        # gradient directions per epoch.  Near +1 = end-to-end cooperative
+        # update; near -1 = gradient reversal.  NaN on epoch 1 or single-layer.
+        "grad_alignment": [],
+        # Largest singular value σ_max(W) per Linear layer per epoch.
+        # A lightweight Lipschitz proxy; high values risk instability.
+        "spectral_norm": {},
+        # Shannon entropy of the optimizer's momentum/variance buffers per epoch.
+        # High = actively exploring; low = converged / collapsed state.
+        "optimizer_state_entropy": [],
+        # Plasticity score: test accuracy after resetting + briefly retraining
+        # the last layer.  Computed every `plasticity_interval` epochs.
+        # NaN in epochs where it is not measured.
+        "plasticity": [],
     }
 
     # ── EMA setup ──────────────────────────────────────────────────────────
@@ -1323,6 +1375,7 @@ def run_training(
             scaler=scaler,
             ema_state=ema_state,
             ema_decay=ema_decay if ema_decay is not None else 0.999,
+            accum_steps=accum_steps,
         )
         global_step_offset += len(epoch_result["step_losses"])
 
@@ -1518,6 +1571,44 @@ def run_training(
             ft = float("nan")
         history["fisher_trace"].append(ft)
 
+        # Gradient alignment: cosine similarity between the first and last
+        # Linear layer's mean gradient directions.  Computed from the same
+        # mean_grad_vec_per_layer dict used for grad_cosine_sim / grad_conflict.
+        # NaN on epoch 1 (no prior direction needed here, but we still need at
+        # least two layers with valid gradient vectors).
+        history["grad_alignment"].append(
+            compute_gradient_alignment(curr_grad_vecs)
+        )
+
+        # Spectral norm: σ_max(W) for each Linear layer.
+        # Only computed when track_spectral_norm=True to avoid SVD every epoch.
+        if track_spectral_norm:
+            sn = compute_spectral_norm(model)
+        else:
+            sn = {}
+        for layer_name, sigma in sn.items():
+            history["spectral_norm"].setdefault(layer_name, []).append(sigma)
+
+        # Optimizer state entropy: Shannon entropy of momentum/variance buffers.
+        # Only computed when track_optimizer_entropy=True.
+        if track_optimizer_entropy:
+            ent = compute_optimizer_state_entropy(optimizer)
+        else:
+            ent = float("nan")
+        history["optimizer_state_entropy"].append(ent)
+
+        # Plasticity score: reset the last layer, fine-tune briefly, measure
+        # recovery accuracy.  Expensive (n_epochs forward+backward passes), so
+        # only computed every plasticity_interval epochs.
+        # plasticity_interval=0 means disabled.
+        if plasticity_interval > 0 and epoch % plasticity_interval == 0:
+            ps = compute_plasticity_score(
+                model, train_loader, test_loader, criterion, device
+            )
+        else:
+            ps = float("nan")
+        history["plasticity"].append(ps)
+
         if scheduler is not None:
             scheduler.step()
 
@@ -1645,6 +1736,14 @@ def parse_args():
                    help="Track effective rank of Linear weight matrices via SVD each epoch.")
     p.add_argument("--fisher", action="store_true",
                    help="Track Fisher information trace (expected squared gradient norm) each epoch.")
+    p.add_argument("--spectral-norm", action="store_true",
+                   help="Track largest singular value σ_max(W) per Linear layer each epoch.")
+    p.add_argument("--optimizer-entropy", action="store_true",
+                   help="Track Shannon entropy of optimizer momentum/variance buffers each epoch.")
+    p.add_argument("--plasticity-interval", type=int, default=0,
+                   help="Compute loss-of-plasticity score every N epochs (0 = disabled).")
+    p.add_argument("--accum-steps", type=int, default=1,
+                   help="Gradient accumulation steps (simulate larger batch; default=1 = no accumulation).")
     return p.parse_args()
 
 
@@ -1821,6 +1920,7 @@ def main():
             scaler=scaler,
             ema_state=ema_state,
             ema_decay=args.ema_decay if args.ema_decay is not None else 0.999,
+            accum_steps=args.accum_steps,
         )
         if swa_model_main is not None and epoch >= args.swa_start:
             swa_model_main.update_parameters(model)
