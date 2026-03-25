@@ -80,6 +80,7 @@ from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, 
 from optimizers import Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop
 # New optimizers (2024)
 from optimizers import SOAP, CautiousAdam, MARS, GrokFast
+from optimizers import Tiger, AdanNesterov
 
 # Optimizers that call loss.backward(create_graph=True) inside their own step()
 # to estimate Hessian-vector products.  GradScaler's loss scaling corrupts the
@@ -141,6 +142,8 @@ OPTIMIZER_REGISTRY: dict = {
     "cautious_adam": lambda p, lr, wd: CautiousAdam(p, lr=lr, weight_decay=wd),
     "mars":          lambda p, lr, wd: MARS(p, lr=lr, weight_decay=wd),
     "grokfast":      lambda p, lr, wd: GrokFast(p, lr=lr, weight_decay=wd),
+    "tiger":         lambda p, lr, wd: Tiger(p, lr=lr, weight_decay=wd),
+    "adan_nesterov": lambda p, lr, wd: AdanNesterov(p, lr=lr, weight_decay=wd),
 }
 
 # ---------------------------------------------------------------------------
@@ -733,6 +736,11 @@ def train_one_epoch(
     step_losses: list[float] = []
     all_raw_norms: list[float] = []   # pre-clip per-param norms across all batches
     all_grad_norms: list[float] = []  # post-clip per-param norms across all batches
+    # For gradient noise scale: one squared global norm per batch, and an
+    # accumulator for the mean gradient vector across ALL parameters (not just
+    # linear layers).  Using per-batch global norms guarantees Jensen's bound.
+    _batch_global_norm_sq: list[float] = []   # ||g_batch||² per batch
+    _global_grad_vec_accum: torch.Tensor | None = None  # sum of flat grad vectors
 
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
@@ -787,6 +795,26 @@ def train_one_epoch(
             if p.grad is not None
         ]
         all_raw_norms.extend(param_grad_norms)
+
+        # Accumulate for gradient noise scale using pre-clip gradients so the
+        # computation is consistent with grad_vec_accum (also pre-clip).
+        # _batch_global_norm_sq: one value per batch = sum of squared per-param norms
+        #   = ||g_batch||² (the global gradient norm squared for this batch)
+        # _global_grad_vec_accum: running sum of flat gradient vectors across batches
+        _batch_sq = sum(n * n for n in param_grad_norms)
+        _batch_global_norm_sq.append(_batch_sq)
+        # Build flat gradient vector for this batch
+        _flat_grads = [
+            p.grad.detach().reshape(-1)
+            for p in model.parameters()
+            if p.grad is not None
+        ]
+        if _flat_grads:
+            _flat = torch.cat(_flat_grads)
+            if _global_grad_vec_accum is None:
+                _global_grad_vec_accum = _flat.clone()
+            else:
+                _global_grad_vec_accum.add_(_flat)
 
         if max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -847,6 +875,24 @@ def train_one_epoch(
         std_n   = var_n ** 0.5
         grad_snr[name] = mean_n / (std_n + 1e-10)
 
+    # Global gradient noise scale: ||E[g]||² / E[||g||²].
+    # Both quantities use the global (all-parameter) gradient vector per batch,
+    # so Jensen's inequality (||E[g]||² ≤ E[||g||²]) is guaranteed to hold.
+    # Numerator: squared norm of the mean gradient vector across all batches.
+    # Denominator: mean squared global gradient norm per batch.
+    # A value near 1 = low noise (consistent gradient direction across batches);
+    # a value near 0 = high noise (mini-batch gradients cancel out).
+    _e_norm_sq = (
+        sum(_batch_global_norm_sq) / len(_batch_global_norm_sq)
+        if _batch_global_norm_sq else 0.0
+    )
+    if _e_norm_sq > 1e-12 and _global_grad_vec_accum is not None:
+        _mean_global_grad = _global_grad_vec_accum / num_batches
+        _norm_e_sq = _mean_global_grad.norm().item() ** 2
+        grad_noise_scale = float(min(_norm_e_sq / _e_norm_sq, 1.0))
+    else:
+        grad_noise_scale = float("nan")
+
     return {
         "loss": total_loss / n,
         "acc": correct / n,
@@ -859,6 +905,8 @@ def train_one_epoch(
         "grad_snr_per_layer": grad_snr,
         # Mean gradient vector per Linear layer (for cosine similarity tracking).
         "mean_grad_vec_per_layer": mean_grad_vec,
+        # Global gradient noise scale (see above).
+        "grad_noise_scale": grad_noise_scale,
     }
 
 
@@ -1004,6 +1052,9 @@ def run_training(
     ema_decay: float | None = None,
     swa_start: int | None = None,
     track_sharpness: bool = False,
+    track_dead_neurons: bool = False,
+    track_weight_rank: bool = False,
+    track_fisher: bool = False,
 ) -> dict:
     """Train *model* for *epochs* and return a history dict.
 
@@ -1057,7 +1108,9 @@ def run_training(
         swa_final_acc              : float | None — SWA model accuracy after training
                                      (None when swa_start is None)
     """
-    from metrics import compute_hessian_trace, compute_sharpness
+    from metrics import (compute_hessian_trace, compute_sharpness,
+                         compute_dead_neurons, compute_weight_rank,
+                         compute_gradient_noise_scale, compute_fisher_trace)
 
     # ── AMP setup ──────────────────────────────────────────────────────────
     scaler = None
@@ -1163,6 +1216,19 @@ def run_training(
             f"{layer_names[i]}↔{layer_names[i+1]}": []
             for i in range(len(layer_names) - 1)
         },
+        # Gradient noise scale per epoch: ||E[g]||² / E[||g||²].
+        # Measures how much the mini-batch gradient direction agrees across
+        # batches.  Near 1 = low noise; near 0 = high noise.
+        "grad_noise_scale": [],
+        # Dead neuron fraction per ReLU layer per epoch (only populated when
+        # track_dead_neurons=True; empty dict otherwise).
+        "dead_neurons": {},
+        # Effective rank per Linear/Conv layer per epoch (only populated when
+        # track_weight_rank=True; empty dict otherwise).
+        "weight_rank": {},
+        # Fisher information trace per epoch: E[||∇_θ log p(y|x)||²].
+        # NaN when track_fisher=False.
+        "fisher_trace": [],
     }
 
     # ── EMA setup ──────────────────────────────────────────────────────────
@@ -1233,7 +1299,7 @@ def run_training(
     # Fixed batch for Hessian/sharpness (reuse same batch each epoch).
     # Grabbed whenever either the Hessian trace or sharpness tracking is active.
     hessian_batch = None
-    if compute_hessian or track_sharpness:
+    if compute_hessian or track_sharpness or track_fisher:
         for batch in train_loader:
             hessian_batch = batch
             break
@@ -1424,6 +1490,34 @@ def run_training(
                 conflict = float("nan")
             history["grad_conflict"][pair_key].append(conflict)
 
+        # Gradient noise scale: taken directly from train_one_epoch accumulators.
+        history["grad_noise_scale"].append(epoch_result["grad_noise_scale"])
+
+        # Dead neurons: fraction of ReLU units that never activated on the test set.
+        # Uses forward hooks — cheap (inference-only, no backward).
+        if track_dead_neurons:
+            dn = compute_dead_neurons(model, test_loader, device)
+        else:
+            dn = {}
+        for relu_name, frac in dn.items():
+            history["dead_neurons"].setdefault(relu_name, []).append(frac)
+
+        # Weight rank: effective rank of each Linear/Conv weight matrix via SVD entropy.
+        if track_weight_rank:
+            wr = compute_weight_rank(model)
+        else:
+            wr = {}
+        for layer_name, rank in wr.items():
+            history["weight_rank"].setdefault(layer_name, []).append(rank)
+
+        # Fisher information trace: E[||∇_θ log p(y|x)||²].
+        # Estimated from n_samples mini-batches of the training set each epoch.
+        if track_fisher and hessian_batch is not None:
+            ft = compute_fisher_trace(model, train_loader, criterion_hessian, device)
+        else:
+            ft = float("nan")
+        history["fisher_trace"].append(ft)
+
         if scheduler is not None:
             scheduler.step()
 
@@ -1545,6 +1639,12 @@ def parse_args():
                    help="Epoch to begin Stochastic Weight Averaging (default: disabled). "
                         "After this epoch weights are averaged across all subsequent epochs; "
                         "a single evaluation is run after training completes.")
+    p.add_argument("--dead-neurons", action="store_true",
+                   help="Track dead ReLU neuron fraction each epoch (forward-pass only, cheap).")
+    p.add_argument("--weight-rank", action="store_true",
+                   help="Track effective rank of Linear weight matrices via SVD each epoch.")
+    p.add_argument("--fisher", action="store_true",
+                   help="Track Fisher information trace (expected squared gradient norm) each epoch.")
     return p.parse_args()
 
 

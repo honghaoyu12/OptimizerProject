@@ -1,23 +1,28 @@
-"""Optimizer diagnostic metrics: Hessian trace and loss-surface sharpness.
+"""Optimizer diagnostic metrics: Hessian trace, loss-surface sharpness,
+dead neuron tracking, weight effective rank, gradient noise scale, and
+Fisher information trace.
 
-Both metrics probe the local geometry of the loss surface around the current
-model weights θ.  They are computed on a *fixed* mini-batch grabbed at the
-start of training so that the values are comparable across epochs.
+All metrics probe the current training state from different angles:
 
-  Hessian trace   Tr(H) — measures total curvature.  High values indicate
-                  a sharp minimum that may be sensitive to weight perturbations
-                  and may generalise poorly.  Computed with Hutchinson's
-                  stochastic estimator to avoid forming the full O(p²) Hessian.
+  Hessian trace     Tr(H) — total curvature via Hutchinson's estimator.
+  Sharpness         max_{‖δ‖≤ε} L(θ+δ) − L(θ) — SAM-style worst-case
+                    loss increase under a bounded perturbation.
+  Dead neurons      Fraction of ReLU units that never fire on a full
+                    dataset pass — a proxy for wasted model capacity.
+  Weight rank       Effective rank of each weight matrix via SVD entropy —
+                    low rank indicates redundant or collapsed representations.
+  Grad noise scale  ||E[g]||² / E[||g||²] — ratio of signal power to total
+                    gradient power; large = low noise, small = dominated by
+                    mini-batch variance.
+  Fisher trace      E[||∇_θ log p(y|x)||²] — expected squared gradient norm,
+                    a lightweight curvature proxy requiring only first-order
+                    backprop.
 
-  Sharpness       max_{‖δ‖≤ε} L(θ+δ) − L(θ) — the worst-case loss increase
-                  under a bounded parameter perturbation.  Closely related to
-                  the PAC-Bayes generalisation bound motivating SAM
-                  (Foret et al., 2021; https://arxiv.org/abs/2010.01412).
-
-Both functions catch all exceptions and return float('nan') on failure so that
-a single incompatible device (e.g. MPS limitations on create_graph) does not
-crash the entire training run — the value simply shows as NaN in plots.
+All functions catch exceptions and return float('nan') / empty dicts on
+failure so that a single incompatible device does not crash the training run.
 """
+
+import math
 
 import torch
 import torch.nn as nn
@@ -203,3 +208,346 @@ def compute_sharpness(
 
     except Exception:
         return float("nan")
+
+
+# ---------------------------------------------------------------------------
+# Dead neuron tracker
+# ---------------------------------------------------------------------------
+
+def compute_dead_neurons(
+    model: nn.Module,
+    loader,
+    device: torch.device,
+    threshold: float = 0.0,
+) -> dict[str, float]:
+    """Fraction of ReLU units that never produce a positive activation.
+
+    A "dead" neuron is one whose pre-activation output is ≤ *threshold*
+    for *every* sample in the loader.  These units contribute nothing to
+    the forward pass and cannot receive a useful gradient — they represent
+    wasted model capacity that the optimizer has failed to utilise.
+
+    Common causes of dead neurons:
+      • Too-high learning rate (large negative weight updates after init)
+      • Dying ReLU problem (gradient never flows back through a unit)
+      • Poor weight initialisation (all pre-activations start negative)
+
+    Implementation
+    --------------
+    Forward hooks are attached to every nn.ReLU module in the model.  Each
+    hook records a boolean *ever-active* mask: True if the output was > 0
+    at least once across all samples.  After the full loader pass, the
+    dead fraction is (1 − mean(ever_active)) per layer.
+
+    The model is run in eval() mode (no BatchNorm/Dropout side-effects) and
+    all gradient computation is disabled.  Hooks are removed unconditionally
+    on exit (success or exception).
+
+    Parameters
+    ----------
+    model     : nn.Module — ReLU activations are detected by isinstance check
+    loader    : DataLoader providing (images, labels) batches
+    device    : torch.device
+    threshold : activation value below which a unit is considered "not fired"
+                (default 0.0 — standard ReLU dead zone)
+
+    Returns
+    -------
+    dict[str, float]
+        Mapping from ReLU layer name to dead neuron fraction in [0, 1].
+        Returns an empty dict if no ReLU modules are found or on failure.
+    """
+    try:
+        model.eval()
+
+        # ── Find all ReLU submodules ───────────────────────────────────────
+        relu_layers: dict[str, nn.Module] = {
+            name: mod
+            for name, mod in model.named_modules()
+            if isinstance(mod, nn.ReLU)
+        }
+        if not relu_layers:
+            return {}
+
+        # ── ever_active[name] accumulates a boolean mask across all batches ─
+        # Initialised to None; set to zeros_like(output) on first batch, then
+        # OR'd with (output > threshold) for each subsequent batch.
+        ever_active: dict[str, torch.Tensor | None] = {n: None for n in relu_layers}
+
+        handles = []
+        def _make_hook(name: str):
+            def _hook(module, inp, output):
+                # output shape: (batch, *feature_dims)
+                # Reduce over the batch dimension to get a per-unit bool mask.
+                # For a Linear output shape is (B, H); for Conv it is (B, C, H, W).
+                fired = (output > threshold)   # (B, ...)
+                # Collapse batch dim: a unit "fired" if it fired for ANY sample.
+                fired_any = fired.any(dim=0)   # (*feature_dims,)
+                if ever_active[name] is None:
+                    ever_active[name] = fired_any
+                else:
+                    ever_active[name] = ever_active[name] | fired_any
+            return _hook
+
+        for name, mod in relu_layers.items():
+            handles.append(mod.register_forward_hook(_make_hook(name)))
+
+        try:
+            with torch.no_grad():
+                for images, _ in loader:
+                    images = images.to(device)
+                    model(images)
+        finally:
+            # Always remove hooks, even if forward pass raises an exception
+            for h in handles:
+                h.remove()
+
+        # ── Compute dead fraction per layer ───────────────────────────────
+        result: dict[str, float] = {}
+        for name, mask in ever_active.items():
+            if mask is None:
+                result[name] = float("nan")
+            else:
+                total  = mask.numel()
+                active = mask.sum().item()
+                result[name] = float(1.0 - active / total) if total > 0 else float("nan")
+        return result
+
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Weight effective rank
+# ---------------------------------------------------------------------------
+
+def compute_weight_rank(model: nn.Module) -> dict[str, float]:
+    """Effective rank of each Linear (and Conv2d) weight matrix via SVD entropy.
+
+    The effective rank of a matrix W with singular values σ₁ ≥ … ≥ σ_k is:
+
+        erank(W) = exp( −∑_i p_i · log(p_i) )
+
+    where p_i = σ_i / ∑_j σ_j are the normalised singular values (treated as
+    a probability distribution over the spectrum).  This equals the exponential
+    of the Shannon entropy of the singular value distribution.
+
+    Interpretation
+    --------------
+    • erank = 1 : all weight magnitude concentrated in one direction (extreme
+      collapse / almost rank-1 matrix)
+    • erank = k : all singular values equal (the matrix is effectively full-rank)
+
+    A *decreasing* erank over training means the weight matrix is collapsing to
+    a lower-dimensional subspace — often a sign that the optimizer is not
+    exploring the full capacity of the layer.  An *increasing* erank means the
+    layer is differentiating its representations.
+
+    For Conv2d layers, the weight tensor (out_c, in_c, kH, kW) is reshaped to
+    a 2-D matrix (out_c, in_c × kH × kW) before computing the SVD.
+
+    Parameters
+    ----------
+    model : nn.Module
+
+    Returns
+    -------
+    dict[str, float]
+        Mapping from layer name to effective rank (float ≥ 1).
+        Layers with a single singular value return erank = 1.0.
+        Returns an empty dict on failure.
+    """
+    try:
+        result: dict[str, float] = {}
+
+        for name, mod in model.named_modules():
+            if isinstance(mod, (nn.Linear, nn.Conv2d)):
+                W = mod.weight.data
+
+                # Reshape Conv2d to 2-D: (out_channels, in_channels * kH * kW)
+                if W.dim() > 2:
+                    W = W.reshape(W.shape[0], -1)
+
+                # SVD on CPU float32 (same pattern as Shampoo / SOAP) to ensure
+                # device-independence and numerical stability.
+                W_cpu = W.detach().float().cpu()
+
+                # torch.linalg.svdvals returns only the singular values (faster
+                # than full SVD since we don't need the singular vectors).
+                sv = torch.linalg.svdvals(W_cpu)   # shape (k,), k = min(m, n)
+
+                sv_sum = sv.sum().item()
+                if sv_sum < 1e-12:
+                    # Degenerate zero matrix — rank is effectively 0 / undefined
+                    result[name] = float("nan")
+                    continue
+
+                # ── Compute entropy of normalised singular value distribution ─
+                # p_i = σ_i / ∑σ; entropy H = −∑ p_i · log(p_i)
+                p = sv / sv_sum          # normalised weights, sum to 1
+                # Add eps to avoid log(0) for zero singular values (which have
+                # p_i = 0 and should contribute 0·log(0) = 0 to the entropy).
+                log_p = torch.log(p.clamp(min=1e-10))
+                entropy = -(p * log_p).sum().item()
+
+                # erank = exp(H) — ranges from 1 (rank-1) to k (full-rank)
+                result[name] = float(math.exp(entropy))
+
+        return result
+
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Gradient noise scale
+# ---------------------------------------------------------------------------
+
+def compute_gradient_noise_scale(
+    grad_mean_sq_norm: float,
+    grad_sq_mean_norm: float,
+) -> float:
+    """Gradient noise scale: ratio of signal power to total gradient power.
+
+    The gradient noise scale (GNS) measures how much of the per-batch
+    gradient norm is "signal" (i.e., direction that agrees across batches)
+    versus "noise" (direction that cancels across batches).
+
+    Definition
+    ----------
+    Given mini-batch gradients g₁, …, g_B collected within an epoch:
+
+      GNS = ||E[g]||² / E[||g||²]
+
+    where the expectation is over mini-batches.
+
+    Interpretation
+    --------------
+    • GNS ≈ 1 : gradients are nearly identical across batches — very low
+               noise.  The full-batch and mini-batch gradients agree.
+    • GNS ≈ 0 : gradient directions cancel across batches — high noise.
+               The mini-batch gradient is a poor estimate of the true gradient.
+    • GNS = B  (batch size) at the optimal batch size from the OpenAI
+               scaling paper (McCandlish et al., 2018) — used as a guide for
+               choosing the right batch size relative to gradient noise.
+
+    This function takes pre-computed aggregates (already available from the
+    per-batch accumulation in train_one_epoch) and returns the scalar GNS.
+
+    Parameters
+    ----------
+    grad_mean_sq_norm : ||mean(g)||²  — squared norm of the mean gradient
+                        (computed as ||mean_grad_vec||² over all parameters
+                        after averaging per-batch gradients)
+    grad_sq_mean_norm : mean(||g||²)  — mean of the squared gradient norms
+                        across mini-batches within the epoch
+
+    Returns
+    -------
+    float
+        GNS in [0, 1].  Returns float('nan') if grad_sq_mean_norm ≤ 0.
+    """
+    if grad_sq_mean_norm <= 0.0:
+        return float("nan")
+    return float(grad_mean_sq_norm / grad_sq_mean_norm)
+
+
+# ---------------------------------------------------------------------------
+# Fisher information trace
+# ---------------------------------------------------------------------------
+
+def compute_fisher_trace(
+    model: nn.Module,
+    loader,
+    criterion: nn.Module,
+    device: torch.device,
+    n_samples: int = 50,
+) -> float:
+    """Fisher information trace: expected squared gradient norm.
+
+    The Fisher information matrix F is defined as:
+
+        F = E_{(x,y)~p_data}[ ∇_θ log p(y|x) · ∇_θ log p(y|x)^T ]
+
+    Its trace Tr(F) = E[||∇_θ log p(y|x)||²] equals the *expected squared
+    gradient norm* over the data distribution — a cheap, first-order-only
+    proxy for the curvature seen by the optimizer.
+
+    Unlike the Hessian trace (which requires second-order backprop), the
+    Fisher trace requires only standard first-order gradients and is
+    therefore O(p) in memory and O(1 backward pass per sample).
+
+    Interpretation
+    --------------
+    • High Fisher trace → steep gradients on average → the loss surface is
+      well-conditioned for gradient-based optimisation (there is strong
+      gradient signal).
+    • Decreasing Fisher trace during training often indicates that the
+      model is converging (loss gradients shrink near a minimum).
+    • Differences across optimizers at the same epoch reflect how each
+      optimizer shapes the effective loss landscape.
+
+    Implementation
+    --------------
+    We sample *n_samples* mini-batches from the loader (or fewer if the
+    loader has fewer batches), compute the gradient norm² for each, and
+    return the average.  Zero-grad is called before each backward so
+    gradients don't accumulate across batches.
+
+    Parameters
+    ----------
+    model     : nn.Module — evaluated in train() mode so BatchNorm uses
+                running stats correctly
+    loader    : DataLoader providing (images, labels) batches
+    criterion : loss function (plain CrossEntropyLoss recommended)
+    device    : torch.device
+    n_samples : number of mini-batches to average over (default 50)
+
+    Returns
+    -------
+    float
+        Estimated Tr(F).  Returns float('nan') on failure.
+    """
+    try:
+        model.train()   # keep BatchNorm in train mode for correct behaviour
+        params = [p for p in model.parameters() if p.requires_grad]
+
+        sq_norm_accum = 0.0
+        count = 0
+
+        for images, labels in loader:
+            if count >= n_samples:
+                break
+
+            images, labels = images.to(device), labels.to(device)
+
+            # Zero existing gradients so each backward is independent.
+            for p in params:
+                if p.grad is not None:
+                    p.grad.zero_()
+
+            logits = model(images)
+            loss   = criterion(logits, labels)
+            loss.backward()
+
+            # Compute total squared gradient norm across all parameters.
+            # ||∇_θ L||² = ∑_i ||∇_{θ_i} L||² (Frobenius norm squared for matrices)
+            batch_sq_norm = sum(
+                p.grad.norm() ** 2 for p in params if p.grad is not None
+            ).item()
+            sq_norm_accum += batch_sq_norm
+            count += 1
+
+        if count == 0:
+            return float("nan")
+
+        # Zero gradients after we're done so training is not affected.
+        for p in params:
+            if p.grad is not None:
+                p.grad.zero_()
+
+        return float(sq_norm_accum / count)
+
+    except Exception:
+        return float("nan")
+

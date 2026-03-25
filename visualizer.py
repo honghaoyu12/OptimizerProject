@@ -1999,3 +1999,328 @@ def plot_lr_sensitivity_curves(
         print(f"\n  LR sensitivity curves saved to {save_path}")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Dead neuron fraction
+# ---------------------------------------------------------------------------
+
+def plot_dead_neurons(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/dead_neurons.png",
+) -> None:
+    """Plot the dead ReLU neuron fraction per epoch.
+
+    A dead neuron is a ReLU unit that produces zero output for every sample
+    in the validation set.  A high dead fraction means a large portion of
+    the network's capacity is wasted.
+
+    The per-ReLU-layer fractions are averaged across all ReLU layers to give
+    a single scalar per epoch per optimizer, making comparison easy.  Runs
+    with no ``dead_neurons`` data are silently skipped.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of series names (optimizer labels)
+    opt_colors     : series_name → hex color
+    save_path      : file path to save the figure (None = don't save)
+    """
+    n_ds  = len(dataset_names)
+    n_mdl = len(model_names)
+    n_cols = max(1, n_ds * n_mdl)
+
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 4), squeeze=False)
+    fig.suptitle("Dead ReLU Neuron Fraction vs Epoch", fontsize=13, fontweight="bold")
+
+    for col, (ds, mdl) in enumerate(
+        (ds, mdl) for ds in dataset_names for mdl in model_names
+    ):
+        ax = axes[0][col]
+        ax.set_title(f"{ds} / {mdl}", fontsize=10)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Dead neuron fraction")
+        ax.set_ylim(-0.02, 1.02)
+        ax.axhline(0, color="gray", linewidth=0.7, linestyle="--")
+        ax.grid(True, alpha=0.3)
+
+        for series in optimizer_names:
+            hist = results.get((ds, mdl, series), {})
+            dn_dict = hist.get("dead_neurons", {})
+            if not dn_dict:
+                continue
+            # Average across all ReLU layers per epoch
+            n_layers = max(len(v) for v in dn_dict.values()) if dn_dict else 0
+            if n_layers == 0:
+                continue
+            avg_per_epoch = []
+            for ep_idx in range(n_layers):
+                vals = [v[ep_idx] for v in dn_dict.values()
+                        if ep_idx < len(v) and not (v[ep_idx] != v[ep_idx])]
+                avg_per_epoch.append(sum(vals) / len(vals) if vals else float("nan"))
+            epochs = list(range(1, len(avg_per_epoch) + 1))
+            color  = opt_colors.get(series, "#333333")
+            ax.plot(epochs, avg_per_epoch, "o-", color=color, label=series,
+                    linewidth=1.8, markersize=4)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Dead neuron figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Weight effective rank
+# ---------------------------------------------------------------------------
+
+def plot_weight_rank(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/weight_rank.png",
+) -> None:
+    """Plot the effective weight matrix rank vs epoch.
+
+    The effective rank of a weight matrix W is computed as exp(H(σ)) where
+    H(σ) is the Shannon entropy of the normalised singular values.  Higher
+    rank = more diverse (full-capacity) representations; lower rank = more
+    collapsed or redundant representations.
+
+    The per-layer ranks are averaged across all tracked layers to give a
+    single scalar per epoch per optimizer.  Runs with no ``weight_rank``
+    data are silently skipped.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of series names (optimizer labels)
+    opt_colors     : series_name → hex color
+    save_path      : file path to save the figure (None = don't save)
+    """
+    n_ds  = len(dataset_names)
+    n_mdl = len(model_names)
+    n_cols = max(1, n_ds * n_mdl)
+
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 4), squeeze=False)
+    fig.suptitle("Effective Weight Matrix Rank vs Epoch", fontsize=13, fontweight="bold")
+
+    for col, (ds, mdl) in enumerate(
+        (ds, mdl) for ds in dataset_names for mdl in model_names
+    ):
+        ax = axes[0][col]
+        ax.set_title(f"{ds} / {mdl}", fontsize=10)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Effective rank (exp(H(σ)))")
+        ax.grid(True, alpha=0.3)
+
+        for series in optimizer_names:
+            hist = results.get((ds, mdl, series), {})
+            wr_dict = hist.get("weight_rank", {})
+            if not wr_dict:
+                continue
+            n_epochs = max(len(v) for v in wr_dict.values()) if wr_dict else 0
+            if n_epochs == 0:
+                continue
+            avg_per_epoch = []
+            for ep_idx in range(n_epochs):
+                vals = [v[ep_idx] for v in wr_dict.values()
+                        if ep_idx < len(v) and not (v[ep_idx] != v[ep_idx])]
+                avg_per_epoch.append(sum(vals) / len(vals) if vals else float("nan"))
+            epochs = list(range(1, len(avg_per_epoch) + 1))
+            color  = opt_colors.get(series, "#333333")
+            ax.plot(epochs, avg_per_epoch, "o-", color=color, label=series,
+                    linewidth=1.8, markersize=4)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Weight rank figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Gradient noise scale
+# ---------------------------------------------------------------------------
+
+def plot_grad_noise_scale(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/grad_noise_scale.png",
+) -> None:
+    """Plot the gradient noise scale per epoch.
+
+    Gradient noise scale = ||E[g]||² / E[||g||²].  Values near 1 indicate
+    low noise (gradient directions agree across mini-batches); values near 0
+    indicate high noise (mini-batch gradients cancel each other).
+
+    Runs with no ``grad_noise_scale`` data or all-NaN values are silently
+    skipped.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of series names (optimizer labels)
+    opt_colors     : series_name → hex color
+    save_path      : file path to save the figure (None = don't save)
+    """
+    import math as _math
+    n_ds  = len(dataset_names)
+    n_mdl = len(model_names)
+    n_cols = max(1, n_ds * n_mdl)
+
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 4), squeeze=False)
+    fig.suptitle("Gradient Noise Scale vs Epoch", fontsize=13, fontweight="bold")
+
+    for col, (ds, mdl) in enumerate(
+        (ds, mdl) for ds in dataset_names for mdl in model_names
+    ):
+        ax = axes[0][col]
+        ax.set_title(f"{ds} / {mdl}", fontsize=10)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Grad noise scale (||E[g]||² / E[||g||²])")
+        ax.set_ylim(-0.02, 1.05)
+        ax.axhline(0, color="gray", linewidth=0.7, linestyle="--")
+        ax.grid(True, alpha=0.3)
+
+        for series in optimizer_names:
+            hist = results.get((ds, mdl, series), {})
+            gns  = hist.get("grad_noise_scale", [])
+            if not gns:
+                continue
+            # Skip if all values are NaN
+            finite = [v for v in gns if not _math.isnan(v)]
+            if not finite:
+                continue
+            epochs = list(range(1, len(gns) + 1))
+            color  = opt_colors.get(series, "#333333")
+            ax.plot(epochs, gns, "o-", color=color, label=series,
+                    linewidth=1.8, markersize=4)
+            # Error band if std key present
+            std_vals = hist.get("grad_noise_scale_std", [])
+            if std_vals and len(std_vals) == len(gns):
+                lo = [max(0, v - s) for v, s in zip(gns, std_vals)]
+                hi = [min(1, v + s) for v, s in zip(gns, std_vals)]
+                ax.fill_between(epochs, lo, hi, color=color, alpha=0.15)
+
+        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Gradient noise scale figure saved to {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Fisher information trace
+# ---------------------------------------------------------------------------
+
+def plot_fisher_trace(
+    results: dict,
+    dataset_names: list[str],
+    model_names: list[str],
+    optimizer_names: list[str],
+    opt_colors: dict[str, str],
+    save_path: str | None = "plots/fisher_trace.png",
+) -> None:
+    """Plot the Fisher information trace per epoch.
+
+    Fisher trace = E[||∇_θ log p(y|x)||²] — the expected squared gradient
+    norm over the data distribution.  It measures the average curvature seen
+    by the optimizer without requiring second-order backprop.
+
+    A decreasing Fisher trace during training often indicates convergence
+    (the model is approaching a flat region of the loss).
+
+    Runs with no ``fisher_trace`` data or all-NaN values are silently skipped.
+
+    Parameters
+    ----------
+    results        : {(dataset_name, model_name, series_name): history_dict}
+    dataset_names  : ordered list of dataset names
+    model_names    : ordered list of model names
+    optimizer_names: ordered list of series names (optimizer labels)
+    opt_colors     : series_name → hex color
+    save_path      : file path to save the figure (None = don't save)
+    """
+    import math as _math
+    n_ds  = len(dataset_names)
+    n_mdl = len(model_names)
+    n_cols = max(1, n_ds * n_mdl)
+
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 4), squeeze=False)
+    fig.suptitle("Fisher Information Trace vs Epoch", fontsize=13, fontweight="bold")
+
+    for col, (ds, mdl) in enumerate(
+        (ds, mdl) for ds in dataset_names for mdl in model_names
+    ):
+        ax = axes[0][col]
+        ax.set_title(f"{ds} / {mdl}", fontsize=10)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Fisher trace (E[||∇ log p||²])")
+        ax.grid(True, alpha=0.3)
+
+        any_plotted = False
+        for series in optimizer_names:
+            hist = results.get((ds, mdl, series), {})
+            ft   = hist.get("fisher_trace", [])
+            if not ft:
+                continue
+            finite = [v for v in ft if not _math.isnan(v)]
+            if not finite:
+                continue
+            epochs = list(range(1, len(ft) + 1))
+            color  = opt_colors.get(series, "#333333")
+            ax.plot(epochs, ft, "o-", color=color, label=series,
+                    linewidth=1.8, markersize=4)
+            std_vals = hist.get("fisher_trace_std", [])
+            if std_vals and len(std_vals) == len(ft):
+                lo = [max(0, v - s) for v, s in zip(ft, std_vals)]
+                hi = [v + s for v, s in zip(ft, std_vals)]
+                ax.fill_between(epochs, lo, hi, color=color, alpha=0.15)
+            any_plotted = True
+
+        if any_plotted:
+            ax.legend(fontsize=8)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Fisher trace figure saved to {save_path}")
+
+    plt.show()

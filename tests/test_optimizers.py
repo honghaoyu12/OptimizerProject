@@ -3,7 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW, SOAP, CautiousAdam, MARS, GrokFast
+from optimizers import VanillaSGD, Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW, SOAP, CautiousAdam, MARS, GrokFast, Tiger, AdanNesterov
 from train import build_optimizer, OPTIMIZER_REGISTRY
 
 
@@ -45,6 +45,8 @@ class TestOptimizerRegistry:
             "sophia", "prodigy", "sf_adamw",
             # New optimizers (2024)
             "soap", "cautious_adam", "mars", "grokfast",
+            # New optimizers (2025)
+            "tiger", "adan_nesterov",
         }
         assert expected == set(OPTIMIZER_REGISTRY.keys())
 
@@ -923,3 +925,138 @@ class TestGrokFast:
             return model.weight.norm().item()
 
         assert _run(1.0) < _run(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Tiger
+# ---------------------------------------------------------------------------
+
+class TestTiger:
+    def test_momentum_buffer_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = Tiger(model.parameters(), lr=1e-4)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "exp_avg" in opt.state[p]
+
+    def test_update_uses_sign(self):
+        """Weight change per coordinate should be exactly ±lr when wd=0."""
+        model = nn.Linear(4, 2, bias=False)
+        nn.init.constant_(model.weight, 1.0)
+        lr = 0.1
+        opt = Tiger(model.parameters(), lr=lr)
+        model(torch.ones(1, 4)).sum().backward()
+        w_before = model.weight.data.clone()
+        opt.step()
+        delta = (model.weight.data - w_before).abs()
+        assert torch.allclose(delta, torch.full_like(delta, lr), atol=1e-6)
+
+    def test_weight_decay_applied(self):
+        """With large weight decay, weights should shrink toward zero."""
+        model = nn.Linear(4, 2, bias=False)
+        nn.init.constant_(model.weight, 1.0)
+        opt = Tiger(model.parameters(), lr=1e-4, weight_decay=1.0)
+        model(torch.zeros(1, 4)).sum().backward()
+        opt.step()
+        assert (model.weight < 1.0).all()
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = Tiger(model.parameters(), lr=1e-4)
+        for _ in range(20):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_momentum_updates_after_step(self):
+        """exp_avg should change across steps."""
+        model = nn.Linear(4, 2, bias=False)
+        opt = Tiger(model.parameters(), lr=1e-4)
+        model(torch.randn(2, 4)).sum().backward()
+        opt.step()
+        opt.zero_grad()
+        m_after_1 = opt.state[model.weight]["exp_avg"].clone()
+        model(torch.randn(2, 4)).sum().backward()
+        opt.step()
+        opt.zero_grad()
+        m_after_2 = opt.state[model.weight]["exp_avg"]
+        assert not torch.allclose(m_after_1, m_after_2)
+
+
+# ---------------------------------------------------------------------------
+# AdanNesterov
+# ---------------------------------------------------------------------------
+
+class TestAdanNesterov:
+    def test_state_initialized(self):
+        model = nn.Linear(8, 4)
+        opt = AdanNesterov(model.parameters(), lr=1e-3)
+        model(torch.randn(4, 8)).sum().backward()
+        opt.step()
+        for p in model.parameters():
+            assert "step" in opt.state[p]
+            assert "exp_avg" in opt.state[p]
+            assert "exp_avg_diff" in opt.state[p]
+            assert "exp_avg_sq" in opt.state[p]
+            assert "prev_grad" in opt.state[p]
+
+    def test_step_counter_increments(self):
+        model = nn.Linear(8, 4)
+        opt = AdanNesterov(model.parameters(), lr=1e-3)
+        for _ in range(3):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert opt.state[p]["step"] == 3
+
+    def test_weights_finite_after_many_steps(self):
+        model = nn.Linear(8, 4)
+        opt = AdanNesterov(model.parameters(), lr=1e-3)
+        for _ in range(20):
+            model(torch.randn(4, 8)).sum().backward()
+            opt.step()
+            opt.zero_grad()
+        for p in model.parameters():
+            assert torch.isfinite(p).all()
+
+    def test_weight_decay_shrinks_params(self):
+        def _run(wd):
+            torch.manual_seed(0)
+            model = nn.Linear(4, 2, bias=False)
+            nn.init.constant_(model.weight, 1.0)
+            opt = AdanNesterov(model.parameters(), lr=1e-3, weight_decay=wd)
+            for _ in range(5):
+                model(torch.randn(2, 4)).sum().backward()
+                opt.step()
+                opt.zero_grad()
+            return model.weight.norm().item()
+
+        assert _run(1.0) < _run(0.0)
+
+    def test_nesterov_gamma_zero_matches_adan(self):
+        """With nesterov_gamma=0 the first step should match standard Adan."""
+        from optimizers import Adan
+        torch.manual_seed(42)
+        model_n = nn.Linear(4, 2, bias=False)
+        torch.manual_seed(42)
+        model_a = nn.Linear(4, 2, bias=False)
+        model_a.weight.data.copy_(model_n.weight.data)
+
+        opt_n = AdanNesterov(model_n.parameters(), lr=1e-3, nesterov_gamma=0.0)
+        opt_a = Adan(model_a.parameters(), lr=1e-3)
+
+        torch.manual_seed(0)
+        x = torch.randn(4, 4)
+        model_n(x).sum().backward()
+        g = model_n.weight.grad.clone()
+        model_a.weight.grad = g.clone()
+
+        opt_n.step()
+        opt_a.step()
+
+        # First step: no prior momentum, gamma=0 → no Nesterov correction
+        assert torch.allclose(model_n.weight.data, model_a.weight.data, atol=1e-6)

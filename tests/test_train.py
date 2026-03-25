@@ -155,7 +155,7 @@ class TestTrainingLoop:
         assert set(result.keys()) == {
             "loss", "acc", "grad_norms_per_layer",
             "grad_norm_global", "grad_norm_std", "grad_norm_before_clip", "step_losses",
-            "grad_snr_per_layer", "mean_grad_vec_per_layer",
+            "grad_snr_per_layer", "mean_grad_vec_per_layer", "grad_noise_scale",
         }
 
     def test_train_one_epoch_loss_finite(self):
@@ -1664,3 +1664,164 @@ class TestGradConflict:
         history = run_training(model, train_loader, test_loader, opt, criterion,
                                device, 1, layer_names, verbose=False)
         assert history["grad_conflict"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Gradient noise scale (train_one_epoch return key)
+# ---------------------------------------------------------------------------
+
+import math as _math
+
+class TestGradNoiseScale:
+    """Tests for the grad_noise_scale key added to train_one_epoch's return dict."""
+
+    def _setup(self):
+        model_name = "mlp"
+        info = DATASET_INFO["mnist"]
+        model = build_model(model_name, info, hidden_sizes=[32, 16]).to(torch.device("cpu"))
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(64, 1, 28, 28)
+        y = torch.randint(0, 10, (64,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=16)
+        layer_names = linear_layer_names(model)
+        return model, optimizer, criterion, torch.device("cpu"), loader, layer_names
+
+    def test_key_present(self):
+        model, opt, crit, dev, loader, names = self._setup()
+        result = train_one_epoch(model, loader, opt, crit, dev, names)
+        assert "grad_noise_scale" in result
+
+    def test_value_is_float(self):
+        model, opt, crit, dev, loader, names = self._setup()
+        result = train_one_epoch(model, loader, opt, crit, dev, names)
+        assert isinstance(result["grad_noise_scale"], float)
+
+    def test_value_in_range(self):
+        """GNS ∈ [0, 1] (Jensen's inequality: ||E[g]||² ≤ E[||g||²])."""
+        model, opt, crit, dev, loader, names = self._setup()
+        result = train_one_epoch(model, loader, opt, crit, dev, names)
+        gns = result["grad_noise_scale"]
+        if not _math.isnan(gns):
+            assert 0.0 <= gns <= 1.0 + 1e-6
+
+    def test_history_key_populated(self):
+        """run_training should populate history['grad_noise_scale'] each epoch."""
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(64, 1, 28, 28)
+        y = torch.randint(0, 10, (64,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=32)
+        layer_names = linear_layer_names(model)
+        history = run_training(model, loader, loader, optimizer, criterion,
+                               torch.device("cpu"), 2, layer_names, verbose=False)
+        assert len(history["grad_noise_scale"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Dead neuron tracking (run_training integration)
+# ---------------------------------------------------------------------------
+
+class TestDeadNeuronsIntegration:
+    def _run(self, track=True):
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(64, 1, 28, 28)
+        y = torch.randint(0, 10, (64,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=32)
+        layer_names = linear_layer_names(model)
+        return run_training(model, loader, loader, optimizer, criterion,
+                            torch.device("cpu"), 2, layer_names, verbose=False,
+                            track_dead_neurons=track)
+
+    def test_empty_when_disabled(self):
+        history = self._run(track=False)
+        assert history["dead_neurons"] == {}
+
+    def test_populated_when_enabled(self):
+        history = self._run(track=True)
+        dn = history["dead_neurons"]
+        assert len(dn) > 0  # at least one ReLU layer in MLP
+        for key, vals in dn.items():
+            assert len(vals) == 2  # one value per epoch
+
+    def test_fractions_in_range(self):
+        history = self._run(track=True)
+        for key, vals in history["dead_neurons"].items():
+            for v in vals:
+                assert 0.0 <= v <= 1.0, f"{key}: {v} out of [0,1]"
+
+
+# ---------------------------------------------------------------------------
+# Weight rank tracking (run_training integration)
+# ---------------------------------------------------------------------------
+
+class TestWeightRankIntegration:
+    def _run(self, track=True):
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(64, 1, 28, 28)
+        y = torch.randint(0, 10, (64,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=32)
+        layer_names = linear_layer_names(model)
+        return run_training(model, loader, loader, optimizer, criterion,
+                            torch.device("cpu"), 2, layer_names, verbose=False,
+                            track_weight_rank=track)
+
+    def test_empty_when_disabled(self):
+        history = self._run(track=False)
+        assert history["weight_rank"] == {}
+
+    def test_populated_when_enabled(self):
+        history = self._run(track=True)
+        wr = history["weight_rank"]
+        assert len(wr) > 0
+        for key, vals in wr.items():
+            assert len(vals) == 2
+
+    def test_ranks_at_least_one(self):
+        history = self._run(track=True)
+        for key, vals in history["weight_rank"].items():
+            for v in vals:
+                if not _math.isnan(v):
+                    assert v >= 1.0 - 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Fisher trace tracking (run_training integration)
+# ---------------------------------------------------------------------------
+
+class TestFisherTraceIntegration:
+    def _run(self, track=True):
+        info = DATASET_INFO["mnist"]
+        model = build_model("mlp", info, hidden_sizes=[16])
+        optimizer = build_optimizer("adam", model, lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        X = torch.randn(64, 1, 28, 28)
+        y = torch.randint(0, 10, (64,))
+        loader = DataLoader(TensorDataset(X, y), batch_size=32)
+        layer_names = linear_layer_names(model)
+        return run_training(model, loader, loader, optimizer, criterion,
+                            torch.device("cpu"), 2, layer_names, verbose=False,
+                            track_fisher=track)
+
+    def test_all_nan_when_disabled(self):
+        history = self._run(track=False)
+        assert all(_math.isnan(v) for v in history["fisher_trace"])
+
+    def test_finite_when_enabled(self):
+        history = self._run(track=True)
+        ft = history["fisher_trace"]
+        assert len(ft) == 2
+        assert all(_math.isfinite(v) for v in ft)
+
+    def test_non_negative_when_enabled(self):
+        history = self._run(track=True)
+        for v in history["fisher_trace"]:
+            assert v >= 0.0

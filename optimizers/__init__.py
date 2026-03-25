@@ -25,6 +25,8 @@ from .soap import SOAP
 from .cautious_adam import CautiousAdam
 from .mars import MARS
 from .grokfast import GrokFast
+from .tiger import Tiger
+from .adan_nesterov import AdanNesterov
 
 __all__ = [
     "BaseOptimizer", "VanillaSGD", "Lion", "LAMB", "Shampoo",
@@ -33,5 +35,5 @@ __all__ = [
     # Custom built-in equivalents
     "Adam", "AdamW", "NAdam", "RAdam", "Adagrad", "SGDMomentum", "RMSprop",
     # New optimizers (2024)
-    "SOAP", "CautiousAdam", "MARS", "GrokFast",
+    "SOAP", "CautiousAdam", "MARS", "GrokFast", "Tiger", "AdanNesterov",
 ]

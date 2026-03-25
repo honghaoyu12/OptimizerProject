@@ -52,6 +52,7 @@ from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, S
 from optimizers import Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop
 # New optimizers (2024)
 from optimizers import SOAP, CautiousAdam, MARS, GrokFast
+from optimizers import Tiger, AdanNesterov
 from train import (DATASET_INFO, SCHEDULER_REGISTRY, get_dataloaders,
                    linear_layer_names, make_param_groups, run_training,
                    save_checkpoint, set_seed)
@@ -61,7 +62,9 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
                         plot_weight_distance, plot_hp_heatmap, plot_grad_snr,
                         plot_class_accuracy, plot_instability, plot_step_size,
                         plot_sharpness, plot_grad_cosine_sim,
-                        plot_grad_conflict, plot_lr_sensitivity_curves)
+                        plot_grad_conflict, plot_lr_sensitivity_curves,
+                        plot_dead_neurons, plot_weight_rank,
+                        plot_grad_noise_scale, plot_fisher_trace)
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +249,16 @@ OPTIMIZER_REGISTRY: OrderedDict = OrderedDict([
         "default_lr": 0.001,
         "color":      "#c5b0d5",   # lavender
     }),
+    ("Tiger",        {
+        "factory":    lambda p, lr, wd: Tiger(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.0001,
+        "color":      "#e377c2",   # pink
+    }),
+    ("AdanNesterov", {
+        "factory":    lambda p, lr, wd: AdanNesterov(p, lr=lr, weight_decay=wd),
+        "default_lr": 0.001,
+        "color":      "#bcbd22",   # yellow-green
+    }),
 ])
 
 
@@ -392,6 +405,9 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         "ece", "batch_loss_std",
         # Sharpness is a scalar per epoch (nan when track_sharpness=False)
         "sharpness",
+        # Gradient noise scale and Fisher trace are scalars per epoch
+        "grad_noise_scale",
+        "fisher_trace",
     ]
     for key in list_keys:
         vals = [h.get(key) or [] for h in histories]
@@ -420,7 +436,8 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         result["step_losses"] = arr.mean(axis=0).tolist()
 
     for key in ("weight_norms", "grad_norms", "weight_distance", "grad_snr",
-                "class_acc", "step_size", "grad_cosine_sim", "grad_conflict"):
+                "class_acc", "step_size", "grad_cosine_sim", "grad_conflict",
+                "dead_neurons", "weight_rank"):
         dicts = [h.get(key, {}) for h in histories]
         all_subkeys: set = set()
         for d in dicts:
@@ -539,6 +556,9 @@ def run_benchmark(
     swa_start: int | None = None,
     auto_lr: bool = False,
     track_sharpness: bool = False,
+    track_dead_neurons: bool = False,
+    track_weight_rank: bool = False,
+    track_fisher: bool = False,
 ) -> dict:
     """Train every (dataset, model, optimizer, weight_decay) combination and collect histories.
 
@@ -677,6 +697,9 @@ def run_benchmark(
                                 ema_decay=ema_decay,
                                 swa_start=swa_start,
                                 track_sharpness=track_sharpness,
+                                track_dead_neurons=track_dead_neurons,
+                                track_weight_rank=track_weight_rank,
+                                track_fisher=track_fisher,
                             )
                             seed_histories.append(history)
 
@@ -804,6 +827,20 @@ def parse_args():
                    help="Path to save gradient conflict figure ('' to disable)")
     p.add_argument("--save-lr-curves", default="plots/lr_curves.png",
                    help="Path to save LR sensitivity training curves ('' to disable)")
+    p.add_argument("--dead-neurons", action="store_true",
+                   help="Track dead ReLU neuron fraction each epoch (cheap forward-pass hook)")
+    p.add_argument("--save-dead-neurons", default="plots/dead_neurons.png",
+                   help="Path to save dead neuron fraction figure ('' to disable)")
+    p.add_argument("--weight-rank", action="store_true",
+                   help="Track effective weight matrix rank via SVD each epoch")
+    p.add_argument("--save-weight-rank", default="plots/weight_rank.png",
+                   help="Path to save weight rank figure ('' to disable)")
+    p.add_argument("--save-grad-noise", default="plots/grad_noise_scale.png",
+                   help="Path to save gradient noise scale figure ('' to disable)")
+    p.add_argument("--fisher", action="store_true",
+                   help="Track Fisher information trace each epoch")
+    p.add_argument("--save-fisher", default="plots/fisher_trace.png",
+                   help="Path to save Fisher trace figure ('' to disable)")
     p.add_argument("--auto-lr", action="store_true",
                    help="Run a learning-rate range test (LR finder) before each "
                         "(optimizer, dataset, model) combination and use the found LR "
@@ -919,6 +956,9 @@ def main():
             swa_start=args.swa_start,
             auto_lr=args.auto_lr and args.lrs is None,
             track_sharpness=args.sharpness,
+            track_dead_neurons=args.dead_neurons,
+            track_weight_rank=args.weight_rank,
+            track_fisher=args.fisher,
         )
         logger.close()
 
@@ -994,6 +1034,26 @@ def main():
     # ── LR Sensitivity Curves ─────────────────────────────────────────────
     if args.save_lr_curves:
         plot_lr_sensitivity_curves(results, save_path=args.save_lr_curves)
+
+    # ── Dead Neurons ──────────────────────────────────────────────────────
+    if args.save_dead_neurons and args.dead_neurons:
+        plot_dead_neurons(results, dataset_names, model_names, series_names,
+                          opt_colors, save_path=args.save_dead_neurons)
+
+    # ── Weight Rank ───────────────────────────────────────────────────────
+    if args.save_weight_rank and args.weight_rank:
+        plot_weight_rank(results, dataset_names, model_names, series_names,
+                         opt_colors, save_path=args.save_weight_rank)
+
+    # ── Gradient Noise Scale ──────────────────────────────────────────────
+    if args.save_grad_noise:
+        plot_grad_noise_scale(results, dataset_names, model_names, series_names,
+                              opt_colors, save_path=args.save_grad_noise)
+
+    # ── Fisher Trace ──────────────────────────────────────────────────────
+    if args.save_fisher and args.fisher:
+        plot_fisher_trace(results, dataset_names, model_names, series_names,
+                          opt_colors, save_path=args.save_fisher)
 
     # ── HP Robustness Heatmap ─────────────────────────────────────────────
     if (args.save_hp_heatmap
