@@ -10,6 +10,10 @@ from synthetic_datasets import (
     make_noisy_grad_loaders,
     make_saddle_loaders,
     make_sparse_loaders,
+    make_checkerboard_loaders,
+    make_plateau_loaders,
+    make_correlated_loaders,
+    make_imbalanced_loaders,
     SYNTHETIC_LOADERS,
 )
 
@@ -19,19 +23,27 @@ from synthetic_datasets import (
 # ---------------------------------------------------------------------------
 
 ALL_MAKERS = [
-    ("illcond",    make_illcond_loaders),
-    ("sparse",     make_sparse_loaders),
-    ("noisy_grad", make_noisy_grad_loaders),
-    ("manifold",   make_manifold_loaders),
-    ("saddle",     make_saddle_loaders),
+    ("illcond",      make_illcond_loaders),
+    ("sparse",       make_sparse_loaders),
+    ("noisy_grad",   make_noisy_grad_loaders),
+    ("manifold",     make_manifold_loaders),
+    ("saddle",       make_saddle_loaders),
+    ("checkerboard", make_checkerboard_loaders),
+    ("plateau",      make_plateau_loaders),
+    ("correlated",   make_correlated_loaders),
+    ("imbalanced",   make_imbalanced_loaders),
 ]
 
 EXPECTED_INPUT_SIZES = {
-    "illcond":    64,
-    "sparse":     100,
-    "noisy_grad": 64,
-    "manifold":   64,
-    "saddle":     64,
+    "illcond":      64,
+    "sparse":       100,
+    "noisy_grad":   64,
+    "manifold":     64,
+    "saddle":       64,
+    "checkerboard": 32,
+    "plateau":      64,
+    "correlated":   64,
+    "imbalanced":   64,
 }
 
 
@@ -42,7 +54,8 @@ EXPECTED_INPUT_SIZES = {
 class TestRegistry:
     def test_all_keys_present(self):
         assert set(SYNTHETIC_LOADERS.keys()) == {
-            "illcond", "sparse", "noisy_grad", "manifold", "saddle"
+            "illcond", "sparse", "noisy_grad", "manifold", "saddle",
+            "checkerboard", "plateau", "correlated", "imbalanced",
         }
 
     def test_all_values_callable(self):
@@ -163,5 +176,76 @@ class TestManifold:
 class TestSaddle:
     def test_both_classes_present(self):
         train_loader, _ = make_saddle_loaders(batch_size=2048)
+        all_y = torch.cat([y for _, y in train_loader])
+        assert set(all_y.tolist()) == {0, 1}
+
+
+class TestCheckerboard:
+    def test_feature_dimension(self):
+        train_loader, _ = make_checkerboard_loaders(batch_size=64)
+        X, _ = next(iter(train_loader))
+        assert X.shape[1] == 32   # 2 signal + 30 noise
+
+    def test_both_classes_present(self):
+        train_loader, _ = make_checkerboard_loaders(batch_size=2048)
+        all_y = torch.cat([y for _, y in train_loader])
+        assert set(all_y.tolist()) == {0, 1}
+
+    def test_roughly_balanced(self):
+        """Checkerboard should be roughly 50/50 by construction."""
+        train_loader, _ = make_checkerboard_loaders(batch_size=2048)
+        all_y = torch.cat([y for _, y in train_loader])
+        frac = all_y.float().mean().item()
+        assert 0.35 < frac < 0.65, f"Class balance {frac:.2f} too extreme"
+
+
+class TestPlateau:
+    def test_feature_dimension(self):
+        train_loader, _ = make_plateau_loaders(batch_size=64)
+        X, _ = next(iter(train_loader))
+        assert X.shape[1] == 64
+
+    def test_both_classes_present(self):
+        train_loader, _ = make_plateau_loaders(batch_size=2048)
+        all_y = torch.cat([y for _, y in train_loader])
+        assert set(all_y.tolist()) == {0, 1}
+
+
+class TestCorrelated:
+    def test_feature_dimension(self):
+        train_loader, _ = make_correlated_loaders(batch_size=64)
+        X, _ = next(iter(train_loader))
+        assert X.shape[1] == 64
+
+    def test_high_pairwise_correlation(self):
+        """Mean pairwise correlation between features should be high (> 0.7)."""
+        train_loader, _ = make_correlated_loaders(batch_size=2048)
+        all_X = torch.cat([X for X, _ in train_loader], dim=0)
+        # Compute correlation matrix via standardised features
+        X_std = (all_X - all_X.mean(0)) / (all_X.std(0) + 1e-8)
+        # Sample a few feature pairs instead of full O(d²) computation
+        corr_01 = (X_std[:, 0] * X_std[:, 1]).mean().item()
+        corr_23 = (X_std[:, 2] * X_std[:, 3]).mean().item()
+        assert corr_01 > 0.7, f"Expected high correlation, got {corr_01:.3f}"
+        assert corr_23 > 0.7, f"Expected high correlation, got {corr_23:.3f}"
+
+
+class TestImbalanced:
+    def test_feature_dimension(self):
+        train_loader, _ = make_imbalanced_loaders(batch_size=64)
+        X, _ = next(iter(train_loader))
+        assert X.shape[1] == 64
+
+    def test_class_imbalance_ratio(self):
+        """Minority class (1) should be roughly 9% of training data."""
+        train_loader, _ = make_imbalanced_loaders(batch_size=2048)
+        all_y = torch.cat([y for _, y in train_loader])
+        minority_frac = all_y.float().mean().item()
+        # 200 minority / 2200 total ≈ 0.091 (test split may shift this slightly)
+        assert 0.05 < minority_frac < 0.20, \
+            f"Expected ~9% minority, got {minority_frac:.2%}"
+
+    def test_both_classes_present(self):
+        train_loader, _ = make_imbalanced_loaders(batch_size=2048)
         all_y = torch.cat([y for _, y in train_loader])
         assert set(all_y.tolist()) == {0, 1}

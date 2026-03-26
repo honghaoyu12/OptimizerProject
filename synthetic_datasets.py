@@ -29,7 +29,25 @@ saddle      Bimodal positive class vs. unimodal negative at origin.
             Symmetric structure creates saddle points; tests momentum-based
             saddle escape (Adam, SGD+Momentum vs. ScheduleFreeAdamW, LAMB).
 
-All five are registered in SYNTHETIC_LOADERS for easy lookup by name.
+checkerboard 2-D checkerboard pattern (4×4 grid) embedded in 32-D.
+            Highly nonlinear XOR-like decision boundary; tests whether
+            optimizers can drive deep enough representation learning.
+
+plateau     Wide flat loss region followed by a sharp drop.
+            Gradient magnitude is near-zero in the plateau and large on the
+            cliff edge; tests optimizers that depend on gradient magnitude
+            (sign-based methods like Lion/Tiger fare well).
+
+correlated  Highly correlated features (ρ ≈ 0.95 between all pairs).
+            Complements illcond with a different kind of ill-conditioning:
+            many near-duplicate directions rather than extreme scale spread.
+
+imbalanced  10:1 class imbalance (binary).
+            Reveals whether optimizers treat the minority class differently;
+            adaptive methods tend to assign larger steps to the rare-class
+            gradient signals.
+
+All nine are registered in SYNTHETIC_LOADERS for easy lookup by name.
 """
 
 import numpy as np
@@ -278,6 +296,160 @@ def make_saddle_loaders(batch_size: int = 128, random_state: int = 42):
                        batch_size=batch_size, random_state=random_state)
 
 
+def make_checkerboard_loaders(batch_size: int = 128, random_state: int = 42):
+    """Checkerboard classification (4×4 grid in 2-D, embedded in 32-D).
+
+    Points are drawn uniformly from [-4, 4]² and labelled by a 4×4
+    checkerboard pattern (XOR of which grid cell each point falls into).
+    30 additional Gaussian noise dimensions are appended so the network
+    must discover the relevant 2-D subspace.
+
+    This is a highly nonlinear, multi-modal decision boundary — no shallow
+    linear or quadratic classifier can solve it.  Optimizers that drive
+    deep representation learning (Adam, Adan) should outperform those that
+    rely on gradient magnitude scaling alone (SignSGD, Lion).
+
+    WHY 4×4 grid: 16 cells, alternating labels — hard enough that a 2-layer
+    MLP needs many epochs but easy enough that convergence is detectable
+    within a short benchmark run.
+
+    Shape : (n=2 000, d=32)   Classes : 2
+    """
+    rng = np.random.RandomState(random_state)
+    n   = 2_000
+    # 2-D coordinates in [-4, 4]
+    xy  = rng.uniform(-4.0, 4.0, size=(n, 2)).astype(np.float32)
+    # Cell index along each axis: 0..3 (4 cells per axis, each width 2)
+    cell_x = np.floor((xy[:, 0] + 4.0) / 2.0).astype(int).clip(0, 3)
+    cell_y = np.floor((xy[:, 1] + 4.0) / 2.0).astype(int).clip(0, 3)
+    # Checkerboard label: XOR of the two cell indices (even XOR = 0, odd XOR = 1)
+    y = ((cell_x + cell_y) % 2).astype(np.int64)
+    # Append 30 Gaussian noise dimensions (scaled small so signal dominates)
+    noise = rng.randn(n, 30).astype(np.float32) * 0.5
+    X = np.hstack([xy, noise])  # (n, 32)
+
+    return _to_loaders(X, y, batch_size=batch_size, random_state=random_state)
+
+
+def make_plateau_loaders(batch_size: int = 128, random_state: int = 42):
+    """Plateau loss-landscape classification.
+
+    The two classes are separated by a wide, nearly-flat sigmoid transition:
+    class 1 when a linear score s > threshold, class 0 otherwise, where the
+    score is fed through a very flat sigmoid (temperature τ = 0.05) before
+    the label is drawn.  This means most of the input space lies in the
+    plateau region where the expected gradient is near zero, with a sharp
+    cliff at the decision boundary.
+
+    Optimizers that rely on gradient magnitude (Adagrad, RMSprop accumulating
+    small gradients) slow down severely in the plateau; sign-based methods
+    (Lion, Tiger, SignSGD) maintain a fixed step size and can cross it
+    faster.  Adam's second-moment normalisation also helps escape plateaus.
+
+    WHY temperature 0.05: creates an extremely flat sigmoid
+    (≈ a step function), so 95%+ of samples land in near-zero gradient
+    territory.  Lowering it further makes the task nearly unlearnable.
+
+    Shape : (n=2 000, d=64)   Classes : 2
+    """
+    rng = np.random.RandomState(random_state)
+    n, d = 2_000, 64
+
+    X = rng.randn(n, d).astype(np.float32)
+    # Linear scoring direction (random unit vector)
+    w = rng.randn(d).astype(np.float32)
+    w /= np.linalg.norm(w) + 1e-8
+    scores = X @ w  # (n,), mean ≈ 0, std ≈ 1
+
+    # Very-flat sigmoid probability for class 1
+    tau = 0.05   # low temperature → near-step function → wide plateau
+    prob_pos = 1.0 / (1.0 + np.exp(-scores / tau))
+    y = (rng.rand(n) < prob_pos).astype(np.int64)
+
+    return _to_loaders(X, y, batch_size=batch_size, random_state=random_state)
+
+
+def make_correlated_loaders(batch_size: int = 128, random_state: int = 42):
+    """Highly correlated features classification (ρ ≈ 0.95 between all pairs).
+
+    All 64 features share a single latent factor z ~ N(0,1) plus small
+    independent noise: x_i = z + 0.23·ε_i.  This produces pairwise
+    correlations of ≈ 1/(1 + 0.23²) ≈ 0.95.  The label is determined by z,
+    so in principle one feature is sufficient — but the optimizer must
+    discover this from a highly redundant, near-rank-1 covariance.
+
+    This differs from illcond (scale spread) by testing a different
+    structural challenge: many near-duplicate gradient directions rather than
+    extreme scale differences.  Second-order methods (Shampoo, SOAP) and
+    methods with per-coordinate adaptivity (Adam) should identify the shared
+    factor faster than SGD, which diffuses the step across all 64 directions.
+
+    WHY ρ = 0.95: high enough that naive PCA-like reasoning fails within a
+    few epochs, but low enough that the task remains solvable by all
+    optimizers given enough time.
+
+    Shape : (n=2 000, d=64)   Classes : 2
+    """
+    rng    = np.random.RandomState(random_state)
+    n, d   = 2_000, 64
+    noise_scale = 0.23   # gives pairwise ρ ≈ 0.95
+
+    # Shared latent factor z
+    z = rng.randn(n).astype(np.float32)           # (n,)
+    # Independent per-feature noise
+    eps = rng.randn(n, d).astype(np.float32) * noise_scale
+    X = z[:, None] + eps                           # (n, d); broadcast z
+
+    # Label: class 1 when z > 0 (the latent factor is above median)
+    y = (z > 0).astype(np.int64)
+
+    return _to_loaders(X, y, batch_size=batch_size, random_state=random_state)
+
+
+def make_imbalanced_loaders(batch_size: int = 128, random_state: int = 42):
+    """Class-imbalanced binary classification (10:1 majority-to-minority ratio).
+
+    The minority class (class 1) comprises only ~9% of samples; the majority
+    class (class 0) comprises ~91%.  Both classes are drawn from isotropic
+    Gaussians with different means so the task is learnable, but the gradient
+    signal from the minority class is swamped by the majority class in each
+    mini-batch.
+
+    Adaptive methods (Adam, Adagrad) implicitly upweight rare-class updates
+    because their per-coordinate second moments track gradient frequency —
+    infrequent minority-class gradients get divided by a smaller v_t, giving
+    them a relatively larger effective step.  Plain SGD has no such mechanism.
+
+    WHY 10:1: a common real-world ratio (fraud detection, medical diagnosis).
+    More extreme ratios (100:1) make the task nearly degenerate without
+    specialised loss functions; 10:1 is challenging but learnable.
+
+    Shape : (n=2 200, d=64)   Classes : 2  (2 000 majority + 200 minority)
+    """
+    rng    = np.random.RandomState(random_state)
+    d      = 64
+    n_maj  = 2_000   # majority class (class 0)
+    n_min  = 200     # minority class (class 1) — 10:1 ratio
+
+    # Majority class: isotropic Gaussian centred at origin
+    X_maj = rng.randn(n_maj, d).astype(np.float32)
+    y_maj = np.zeros(n_maj, dtype=np.int64)
+
+    # Minority class: shifted by 2 along a random direction
+    direction = rng.randn(d).astype(np.float32)
+    direction /= np.linalg.norm(direction) + 1e-8
+    X_min = rng.randn(n_min, d).astype(np.float32) + 2.0 * direction
+    y_min = np.ones(n_min, dtype=np.int64)
+
+    X = np.vstack([X_maj, X_min])
+    y = np.concatenate([y_maj, y_min])
+
+    # Shuffle before splitting so both classes appear in train and test
+    perm = rng.permutation(len(X))
+    return _to_loaders(X[perm], y[perm],
+                       batch_size=batch_size, random_state=random_state)
+
+
 # ---------------------------------------------------------------------------
 # Registry (mirrors train.py pattern for easy lookup by name)
 # ---------------------------------------------------------------------------
@@ -285,9 +457,13 @@ def make_saddle_loaders(batch_size: int = 128, random_state: int = 42):
 # Maps the dataset name used in DATASET_INFO and on the command line to the
 # corresponding loader factory function.  Add new synthetic datasets here.
 SYNTHETIC_LOADERS: dict = {
-    "illcond":    make_illcond_loaders,
-    "sparse":     make_sparse_loaders,
-    "noisy_grad": make_noisy_grad_loaders,
-    "manifold":   make_manifold_loaders,
-    "saddle":     make_saddle_loaders,
+    "illcond":      make_illcond_loaders,
+    "sparse":       make_sparse_loaders,
+    "noisy_grad":   make_noisy_grad_loaders,
+    "manifold":     make_manifold_loaders,
+    "saddle":       make_saddle_loaders,
+    "checkerboard": make_checkerboard_loaders,
+    "plateau":      make_plateau_loaders,
+    "correlated":   make_correlated_loaders,
+    "imbalanced":   make_imbalanced_loaders,
 }

@@ -98,6 +98,10 @@ DATASET_REGISTRY: OrderedDict = OrderedDict([
     ("Noisy Gradient (synth)",    "noisy_grad"),
     ("Nonlinear Manifold (synth)","manifold"),
     ("Saddle Point (synth)",      "saddle"),
+    ("Checkerboard (synth)",      "checkerboard"),
+    ("Plateau (synth)",           "plateau"),
+    ("Correlated (synth)",        "correlated"),
+    ("Imbalanced (synth)",        "imbalanced"),
 ])
 
 MODEL_REGISTRY: OrderedDict = OrderedDict([

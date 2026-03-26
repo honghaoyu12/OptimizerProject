@@ -13,8 +13,8 @@ This is the central training module.  It provides:
   - A CLI (parse_args + main) for quick single-run experiments
 
 Supports datasets  : mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet
-                     + 5 synthetic tabular datasets (illcond, sparse, noisy_grad,
-                     manifold, saddle)
+                     + 9 synthetic tabular datasets (illcond, sparse, noisy_grad,
+                     manifold, saddle, checkerboard, plateau, correlated, imbalanced)
 Supports models    : mlp | resnet18 | vit
 Supports optimizers: 20 choices — see OPTIMIZER_REGISTRY below for the full list.
 Supports schedulers: none | cosine | step | warmup_cosine | cosine_wr
@@ -417,6 +417,10 @@ DATASET_INFO = {
     "noisy_grad":     {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
     "manifold":       {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
     "saddle":         {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "checkerboard":   {"in_channels": 1, "input_size": 32,    "num_classes": 2,  "tabular": True},
+    "plateau":        {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "correlated":     {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    "imbalanced":     {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
 }
 
 # ---------------------------------------------------------------------------
@@ -1662,7 +1666,7 @@ def run_training(
 
 def parse_args():
     p = argparse.ArgumentParser(description="Single-run trainer (MNIST / FashionMNIST / CIFAR-10)")
-    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet | illcond | sparse | noisy_grad | manifold | saddle")
+    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet | illcond | sparse | noisy_grad | manifold | saddle | checkerboard | plateau | correlated | imbalanced")
     p.add_argument("--model",        default="mlp",      help="mlp | resnet18 | vit")
     p.add_argument("--optimizer",    default="adam",     help="Optimizer name (see OPTIMIZER_REGISTRY)")
     p.add_argument("--lr",           default=1e-3,       type=float, help="Learning rate")

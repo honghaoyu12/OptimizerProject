@@ -44,6 +44,7 @@ class TestDatasetInfo:
         assert set(DATASET_INFO.keys()) == {
             "mnist", "fashion_mnist", "cifar10", "cifar100", "tiny_imagenet",
             "illcond", "sparse", "noisy_grad", "manifold", "saddle",
+            "checkerboard", "plateau", "correlated", "imbalanced",
         }
 
     @pytest.mark.parametrize("key,in_ch,input_sz,n_cls", [
@@ -57,6 +58,10 @@ class TestDatasetInfo:
         ("noisy_grad",    1, 64,    2),
         ("manifold",      1, 64,    2),
         ("saddle",        1, 64,    2),
+        ("checkerboard",  1, 32,    2),
+        ("plateau",       1, 64,    2),
+        ("correlated",    1, 64,    2),
+        ("imbalanced",    1, 64,    2),
     ])
     def test_dataset_metadata(self, key, in_ch, input_sz, n_cls):
         info = DATASET_INFO[key]
