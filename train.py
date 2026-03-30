@@ -1,10 +1,10 @@
-"""Single-run trainer for image and tabular classification.
+"""Single-run trainer for image, tabular, and language model tasks.
 
 This is the central training module.  It provides:
   - OPTIMIZER_REGISTRY (20 entries) and SCHEDULER_REGISTRY (5 entries)
-  - Dataset loaders for MNIST, FashionMNIST, CIFAR-10/100, Tiny ImageNet
-    and 5 synthetic tabular datasets (see synthetic_datasets.py)
-  - build_model() — selects MLP, ResNet-18, or ViT from a dataset spec
+  - Dataset loaders for MNIST, FashionMNIST, CIFAR-10/100, Tiny ImageNet,
+    9 synthetic tabular datasets, and 2 LM datasets (see lm_datasets.py)
+  - build_model() — selects MLP, ResNet-18, ViT, or GPT from a dataset spec
   - train_one_epoch() — single epoch: forward, backward, optimizer step,
     gradient statistics accumulation, EMA update
   - run_training() — full multi-epoch training loop: calls train_one_epoch,
@@ -15,7 +15,8 @@ This is the central training module.  It provides:
 Supports datasets  : mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet
                      + 9 synthetic tabular datasets (illcond, sparse, noisy_grad,
                      manifold, saddle, checkerboard, plateau, correlated, imbalanced)
-Supports models    : mlp | resnet18 | vit
+                     + 2 LM datasets (tinystories | wikitext103)
+Supports models    : mlp | resnet18 | vit | gpt
 Supports optimizers: 20 choices — see OPTIMIZER_REGISTRY below for the full list.
 Supports schedulers: none | cosine | step | warmup_cosine | cosine_wr
 
@@ -56,7 +57,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from logger import TrainingLogger
-from model import MLP, ResNet18, ViT
+from model import MLP, ResNet18, ViT, GPT
 from visualizer import Visualizer
 from lr_finder import LRFinder
 
@@ -421,6 +422,9 @@ DATASET_INFO = {
     "plateau":        {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
     "correlated":     {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
     "imbalanced":     {"in_channels": 1, "input_size": 64,    "num_classes": 2,  "tabular": True},
+    # Language model datasets (GPT only; causal next-token prediction)
+    "tinystories":    {"vocab_size": 256, "seq_len": 128, "task_type": "lm"},
+    "wikitext103":    {"vocab_size": 256, "seq_len": 256, "task_type": "lm"},
 }
 
 # ---------------------------------------------------------------------------
@@ -516,6 +520,15 @@ def get_dataloaders(dataset: str = "mnist", batch_size: int = 128, data_dir: str
     if dataset not in DATASET_INFO:
         raise ValueError(f"Unknown dataset '{dataset}'. Choose from {list(DATASET_INFO)}")
 
+    # Language model datasets — delegate to lm_datasets
+    if DATASET_INFO[dataset].get("task_type") == "lm":
+        from lm_datasets import LM_DATASETS
+        ds_info = DATASET_INFO[dataset]
+        return LM_DATASETS[dataset](
+            seq_len=ds_info["seq_len"],
+            batch_size=batch_size,
+        )
+
     # Synthetic tabular datasets are self-normalising — delegate immediately
     if DATASET_INFO[dataset].get("tabular"):
         from synthetic_datasets import SYNTHETIC_LOADERS
@@ -574,12 +587,25 @@ def build_model(model_name: str, dataset_info: dict, hidden_sizes: list[int]) ->
 
     Parameters
     ----------
-    model_name   : "mlp" | "resnet18" | "vit"
-    dataset_info : dict with keys in_channels, input_size, num_classes.
-                   Tabular datasets must use "mlp"; others raise ValueError.
+    model_name   : "mlp" | "resnet18" | "vit" | "gpt"
+    dataset_info : dict with keys in_channels, input_size, num_classes (image/tabular)
+                   or vocab_size, seq_len (LM datasets).
+                   Tabular datasets must use "mlp"; LM datasets must use "gpt".
     hidden_sizes : hidden layer widths (only used by MLP, ignored for others)
     """
     name = model_name.lower()
+    is_lm = dataset_info.get("task_type") == "lm"
+
+    if is_lm:
+        if name not in ("gpt", ""):
+            raise ValueError(
+                f"Model '{model_name}' is not supported for LM datasets. Use GPT."
+            )
+        return GPT(
+            vocab_size=dataset_info["vocab_size"],
+            seq_len=dataset_info["seq_len"],
+        )
+
     if dataset_info.get("tabular") and name != "mlp":
         raise ValueError(
             f"Model '{model_name}' is not supported for tabular datasets. Use MLP."
@@ -603,7 +629,7 @@ def build_model(model_name: str, dataset_info: dict, hidden_sizes: list[int]) ->
             num_classes=dataset_info["num_classes"],
         )
     else:
-        raise ValueError(f"Unknown model '{model_name}'. Choose from: mlp, resnet18, vit")
+        raise ValueError(f"Unknown model '{model_name}'. Choose from: mlp, resnet18, vit, gpt")
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +716,7 @@ def train_one_epoch(
     ema_state: dict | None = None,
     ema_decay: float = 0.999,
     accum_steps: int = 1,
+    task_type: str = "classification",
 ) -> dict:
     """Run one training epoch and return per-epoch metrics.
 
@@ -719,12 +746,17 @@ def train_one_epoch(
                        a larger effective batch size without extra memory cost by
                        dividing each micro-batch loss by accum_steps before
                        backward so gradients sum to the correct scale.
+    task_type        : "classification" (default) or "lm".  When "lm", each
+                       batch is a (B, seq_len) integer token tensor; the model
+                       returns (B, seq_len, vocab_size) logits and loss is
+                       next-token cross-entropy over positions 0..seq_len-2.
 
     Returns
     -------
     dict with keys:
-        loss                 : float  — average per-sample cross-entropy
-        acc                  : float  — fraction of correct predictions in [0, 1]
+        loss                 : float  — average cross-entropy (per token for LM)
+        acc                  : float  — classification accuracy or token accuracy
+        perplexity           : float  — exp(loss), only meaningful for LM (nan for classification)
         grad_norms_per_layer : dict[str, float]  — mean grad L2 norm per linear layer
         grad_norm_global     : float  — global L2 norm across all params (post-clip)
         grad_norm_std        : float  — std of per-parameter gradient norms
@@ -734,6 +766,7 @@ def train_one_epoch(
     """
     model.train()
     total_loss, correct = 0.0, 0
+    total_tokens = 0  # for LM: number of predicted tokens
     grad_accum    = {n: 0.0 for n in layer_names}
     # Tracks the sum-of-squares of per-batch gradient norms per layer.
     # Together with grad_accum (sum of norms), this lets us compute
@@ -758,21 +791,36 @@ def train_one_epoch(
     # Clamp accum_steps to at least 1 so callers can pass 0 safely.
     _accum = max(1, accum_steps)
 
+    _is_lm = task_type == "lm"
+
     # zero_grad once before the very first micro-batch.
     optimizer.zero_grad()
 
-    for batch_idx, (images, labels) in enumerate(loader):
-        images, labels = images.to(device), labels.to(device)
+    for batch_idx, batch in enumerate(loader):
+        if _is_lm:
+            # LM batch: (B, seq_len) integer token IDs
+            tokens = batch.to(device)          # (B, T)
+            inputs  = tokens[:, :-1]           # (B, T-1) — context
+            targets = tokens[:, 1:].reshape(-1)  # (B*(T-1),) — next tokens
+            B, Tm1 = inputs.shape
+        else:
+            images, labels = batch
+            images, labels = images.to(device), labels.to(device)
 
         amp_ctx = (
             torch.autocast(device_type=device.type, dtype=torch.float16)
             if amp else contextlib.nullcontext()
         )
         with amp_ctx:
-            logits = model(images)
-            # Divide loss by accum_steps so gradients accumulate at the
-            # correct scale (equivalent to averaging over a larger batch).
-            loss = criterion(logits, labels) / _accum
+            if _is_lm:
+                logits = model(inputs)          # (B, T-1, vocab_size)
+                V = logits.shape[-1]
+                loss = criterion(logits.reshape(-1, V), targets) / _accum
+            else:
+                logits = model(images)
+                # Divide loss by accum_steps so gradients accumulate at the
+                # correct scale (equivalent to averaging over a larger batch).
+                loss = criterion(logits, labels) / _accum
 
         if getattr(optimizer, "requires_create_graph", False):
             # Use autograd.grad so gradients are differentiable graph nodes
@@ -873,12 +921,28 @@ def train_one_epoch(
             num_steps += 1
 
         # Undo the loss / _accum scaling for logging (report raw batch loss).
-        total_loss += loss.item() * _accum * images.size(0)
-        correct += (logits.argmax(dim=1) == labels).sum().item()
+        if _is_lm:
+            n_tok = targets.numel()
+            total_loss   += loss.item() * _accum * n_tok
+            correct      += (logits.reshape(-1, V).argmax(dim=1) == targets).sum().item()
+            total_tokens += n_tok
+        else:
+            total_loss += loss.item() * _accum * images.size(0)
+            correct += (logits.argmax(dim=1) == labels).sum().item()
         step_losses.append(loss.item() * _accum)
         num_batches += 1
 
-    n = len(loader.dataset)
+    if _is_lm:
+        n = max(total_tokens, 1)
+        avg_loss = total_loss / n
+        import math
+        perplexity = math.exp(min(avg_loss, 20.0))  # cap to avoid overflow
+        acc = correct / n
+    else:
+        n = len(loader.dataset)
+        avg_loss = total_loss / n
+        perplexity = float("nan")
+        acc = correct / n
     # Use num_steps (optimizer steps) as denominator for per-step averages;
     # fall back to num_batches if no steps were taken (empty loader).
     _denom = num_steps if num_steps > 0 else max(num_batches, 1)
@@ -888,8 +952,8 @@ def train_one_epoch(
     # Divide accumulated sum by number of optimizer steps; leave as None if no grad.
     mean_grad_vec: dict[str, torch.Tensor | None] = {}
     for name in layer_names:
-        acc = grad_vec_accum[name]
-        mean_grad_vec[name] = (acc / _denom) if (acc is not None and _denom > 0) else None
+        _gv = grad_vec_accum[name]
+        mean_grad_vec[name] = (_gv / _denom) if (_gv is not None and _denom > 0) else None
 
     import statistics
     grad_norm_global = float(sum(g ** 2 for g in all_grad_norms) ** 0.5) if all_grad_norms else 0.0
@@ -930,8 +994,9 @@ def train_one_epoch(
         grad_noise_scale = float("nan")
 
     return {
-        "loss": total_loss / n,
-        "acc": correct / n,
+        "loss": avg_loss,
+        "acc": acc,
+        "perplexity": perplexity,
         "grad_norms_per_layer": avg_grad_norms,
         "grad_norm_global": grad_norm_global,
         "grad_norm_std": grad_norm_std,
@@ -1095,6 +1160,7 @@ def run_training(
     track_optimizer_entropy: bool = False,
     plasticity_interval: int = 0,
     accum_steps: int = 1,
+    task_type: str = "classification",
 ) -> dict:
     """Train *model* for *epochs* and return a history dict.
 
@@ -1154,6 +1220,28 @@ def run_training(
                          compute_gradient_alignment, compute_spectral_norm,
                          compute_optimizer_state_entropy, compute_plasticity_score)
 
+    _is_lm = task_type == "lm"
+
+    @torch.no_grad()
+    def _evaluate_lm(mdl, ldr, crit, dev):
+        """Evaluate LM model: returns (avg_loss, token_acc, perplexity)."""
+        import math
+        mdl.eval()
+        total_loss, correct, total_tok = 0.0, 0, 0
+        for tokens in ldr:
+            tokens = tokens.to(dev)
+            inp, tgt = tokens[:, :-1], tokens[:, 1:].reshape(-1)
+            logits = mdl(inp)
+            V = logits.shape[-1]
+            loss = crit(logits.reshape(-1, V), tgt)
+            n_tok = tgt.numel()
+            total_loss += loss.item() * n_tok
+            correct    += (logits.reshape(-1, V).argmax(dim=1) == tgt).sum().item()
+            total_tok  += n_tok
+        n = max(total_tok, 1)
+        avg_loss = total_loss / n
+        return avg_loss, correct / n, math.exp(min(avg_loss, 20.0))
+
     # ── AMP setup ──────────────────────────────────────────────────────────
     scaler = None
     if amp:
@@ -1181,6 +1269,8 @@ def run_training(
     history: dict = {
         "train_loss": [], "test_loss": [],
         "train_acc":  [], "test_acc":  [],
+        # LM-specific metrics (nan for classification runs)
+        "train_perplexity": [], "test_perplexity": [],
         "weight_norms":    {n: [] for n in layer_names},
         "grad_norms":      {n: [] for n in layer_names},
         # ||w_t - w_0||_2 per layer — how far the optimizer has moved each
@@ -1380,6 +1470,7 @@ def run_training(
             ema_state=ema_state,
             ema_decay=ema_decay if ema_decay is not None else 0.999,
             accum_steps=accum_steps,
+            task_type=task_type,
         )
         global_step_offset += len(epoch_result["step_losses"])
 
@@ -1388,7 +1479,14 @@ def run_training(
 
         train_loss = epoch_result["loss"]
         train_acc  = epoch_result["acc"]
-        test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+        if _is_lm:
+            test_loss, test_acc, test_ppl = _evaluate_lm(model, test_loader, criterion, device)
+            history["train_perplexity"].append(epoch_result["perplexity"])
+            history["test_perplexity"].append(test_ppl)
+        else:
+            test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+            history["train_perplexity"].append(float("nan"))
+            history["test_perplexity"].append(float("nan"))
 
         # EMA evaluation: temporarily load EMA weights, evaluate, then restore.
         # IMPORTANT — state_dict() returns detached views sharing parameter storage,
@@ -1448,16 +1546,19 @@ def run_training(
         history["batch_loss_std"].append(_batch_loss_std)
 
         # Calibration — one-pass ECE evaluation on the test set.
-        # Computed on the *raw* model weights (not EMA / SWA) so the value
-        # tracks how calibration evolves with the primary optimisation trajectory.
-        ece_val = compute_ece(model, test_loader, device)
+        # Skipped for LM runs (ECE is not meaningful for next-token prediction).
+        if not _is_lm:
+            ece_val = compute_ece(model, test_loader, device)
+        else:
+            ece_val = float("nan")
         history["ece"].append(ece_val)
 
         # Per-class accuracy — single forward pass over the test set.
-        # Keys are class IDs (int); populated lazily so no num_classes needed.
-        cls_acc = per_class_accuracy(model, test_loader, device)
-        for cls_id, cls_val in cls_acc.items():
-            history["class_acc"].setdefault(cls_id, []).append(cls_val)
+        # Skipped for LM runs.
+        if not _is_lm:
+            cls_acc = per_class_accuracy(model, test_loader, device)
+            for cls_id, cls_val in cls_acc.items():
+                history["class_acc"].setdefault(cls_id, []).append(cls_val)
 
         # Optimizer internal state snapshot
         _states = _extract_optimizer_states(model, optimizer, layer_names)
@@ -1617,11 +1718,18 @@ def run_training(
             scheduler.step()
 
         if verbose:
-            print(
-                f"  Epoch {epoch:>3}/{epochs} | "
-                f"train loss {train_loss:.4f}  acc {train_acc*100:.2f}% | "
-                f"test  loss {test_loss:.4f}  acc {test_acc*100:.2f}%"
-            )
+            if _is_lm:
+                print(
+                    f"  Epoch {epoch:>3}/{epochs} | "
+                    f"train loss {train_loss:.4f}  ppl {epoch_result['perplexity']:.1f} | "
+                    f"test  loss {test_loss:.4f}  ppl {test_ppl:.1f}"
+                )
+            else:
+                print(
+                    f"  Epoch {epoch:>3}/{epochs} | "
+                    f"train loss {train_loss:.4f}  acc {train_acc*100:.2f}% | "
+                    f"test  loss {test_loss:.4f}  acc {test_acc*100:.2f}%"
+                )
 
         if es.step(test_loss, model):
             history["early_stopped_epoch"] = epoch
@@ -1666,8 +1774,8 @@ def run_training(
 
 def parse_args():
     p = argparse.ArgumentParser(description="Single-run trainer (MNIST / FashionMNIST / CIFAR-10)")
-    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet | illcond | sparse | noisy_grad | manifold | saddle | checkerboard | plateau | correlated | imbalanced")
-    p.add_argument("--model",        default="mlp",      help="mlp | resnet18 | vit")
+    p.add_argument("--dataset",      default="mnist",    help="mnist | fashion_mnist | cifar10 | cifar100 | tiny_imagenet | illcond | sparse | noisy_grad | manifold | saddle | checkerboard | plateau | correlated | imbalanced | tinystories | wikitext103")
+    p.add_argument("--model",        default="mlp",      help="mlp | resnet18 | vit | gpt")
     p.add_argument("--optimizer",    default="adam",     help="Optimizer name (see OPTIMIZER_REGISTRY)")
     p.add_argument("--lr",           default=1e-3,       type=float, help="Learning rate")
     p.add_argument("--epochs",       default=10,         type=int)
@@ -1773,7 +1881,11 @@ def main():
 
     # Build model
     ds_info = DATASET_INFO[args.dataset.lower()]
-    model = build_model(args.model, ds_info, args.hidden_sizes).to(device)
+    # Auto-select GPT for LM datasets if model not explicitly overridden
+    model_name = args.model
+    if ds_info.get("task_type") == "lm" and model_name == "mlp":
+        model_name = "gpt"
+    model = build_model(model_name, ds_info, args.hidden_sizes).to(device)
     print(f"Parameters   : {sum(p.numel() for p in model.parameters()):,}")
 
     layer_names = linear_layer_names(model)

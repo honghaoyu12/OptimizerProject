@@ -1,7 +1,7 @@
 """Optimizer diagnostic metrics: Hessian trace, loss-surface sharpness,
 dead neuron tracking, weight effective rank, gradient noise scale, Fisher
 information trace, loss of plasticity, gradient alignment, spectral norm,
-and optimizer state entropy.
+optimizer state entropy, perplexity, and token accuracy.
 
 All metrics probe the current training state from different angles:
 
@@ -28,6 +28,8 @@ All metrics probe the current training state from different angles:
                       training instability.
   Optimizer entropy   Shannon entropy of the momentum / variance buffers —
                       collapses near convergence as state concentrates.
+  Perplexity          exp(loss) — standard LM quality metric; lower is better.
+  Token accuracy      Fraction of next tokens predicted correctly (argmax).
 
 All functions catch exceptions and return float('nan') / empty dicts on
 failure so that a single incompatible device does not crash the training run.
@@ -819,3 +821,53 @@ def compute_optimizer_state_entropy(optimizer: "torch.optim.Optimizer") -> float
 
     except Exception:
         return float("nan")
+
+
+# ---------------------------------------------------------------------------
+# Language model metrics
+# ---------------------------------------------------------------------------
+
+def compute_perplexity(loss: float) -> float:
+    """Compute perplexity from cross-entropy loss.
+
+    Perplexity = exp(loss) — the exponent of the average negative log-likelihood
+    per token.  A lower value indicates a better language model.
+
+    Parameters
+    ----------
+    loss : float
+        Mean cross-entropy loss per token (in nats, i.e. using natural log).
+
+    Returns
+    -------
+    float
+        Perplexity value.  Capped at exp(20) ≈ 485 million to avoid overflow
+        for untrained models with very high loss.  Returns nan for non-finite
+        input.
+    """
+    if not math.isfinite(loss):
+        return float("nan")
+    return math.exp(min(loss, 20.0))
+
+
+def compute_token_accuracy(
+    logits: "torch.Tensor",
+    targets: "torch.Tensor",
+) -> float:
+    """Fraction of tokens predicted correctly (argmax of logits).
+
+    Parameters
+    ----------
+    logits  : (N, vocab_size) float tensor — raw model output (pre-softmax)
+    targets : (N,) int64 tensor — ground-truth next-token IDs
+
+    Returns
+    -------
+    float
+        Token-level accuracy in [0, 1].  Returns 0.0 on empty inputs.
+    """
+    if logits.numel() == 0 or targets.numel() == 0:
+        return 0.0
+    preds = logits.argmax(dim=-1)
+    return (preds == targets).float().mean().item()
+

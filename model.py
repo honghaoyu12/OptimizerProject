@@ -1,7 +1,6 @@
-"""Neural network architectures for image classification benchmarks.
+"""Neural network architectures for image classification and language model benchmarks.
 
-This module provides three model families scaled appropriately for the small
-image datasets (MNIST 28×28, CIFAR 32×32) used in this project:
+This module provides four model families:
 
   MLP      — Configurable fully-connected network; depth and width controlled
               by hidden_sizes.  Simple baseline for tabular and image tasks.
@@ -14,8 +13,13 @@ image datasets (MNIST 28×28, CIFAR 32×32) used in this project:
               size 4 divides evenly into both 28 and 32, giving 49 or 64 tokens
               respectively.
 
-All three return raw logits (no softmax); cross-entropy in the training loop
-applies the softmax internally via log_softmax + NLLLoss.
+  GPT      — Decoder-only Transformer for causal language modelling.  Uses a
+              causal attention mask so each token only attends to prior tokens.
+              Returns (B, seq_len, vocab_size) logits; the training loop shifts
+              inputs by one to form next-token prediction targets.
+
+MLP/ResNet18/ViT return (B, num_classes) logits; GPT returns
+(B, seq_len, vocab_size) logits.
 """
 
 import torch
@@ -291,3 +295,149 @@ class ViT(nn.Module):
         # x[:, 0] extracts the CLS token for each example in the batch
         cls_out = self.norm(x[:, 0])        # (B, dim)
         return self.head(cls_out)           # (B, num_classes)
+
+
+# ---------------------------------------------------------------------------
+# GPT (decoder-only Transformer for causal language modelling)
+# ---------------------------------------------------------------------------
+
+class GPT(nn.Module):
+    """Decoder-only Transformer for causal language modelling.
+
+    Implements a GPT-style architecture with:
+    - Token embeddings + learned positional embeddings
+    - Pre-LayerNorm Transformer decoder layers with causal self-attention mask
+    - Linear LM head projecting to vocabulary logits
+
+    The causal mask ensures token i can only attend to tokens 0..i, so the
+    model is trained with teacher forcing: given tokens 0..T-2, predict tokens
+    1..T-1 (next-token prediction).
+
+    Output shape is (B, seq_len, vocab_size) — the training loop applies
+    cross-entropy loss with inputs shifted by one position.
+
+    Parameters
+    ----------
+    vocab_size : int
+        Size of the token vocabulary (e.g. 256 for char-level, 50257 for BPE).
+    seq_len : int
+        Maximum sequence length (context window).  Positional embeddings are
+        sized to this; longer sequences will error.
+    dim : int
+        Token embedding dimension (d_model).  Default 128 fits on CPU.
+    depth : int
+        Number of stacked Transformer decoder layers.  Default 4.
+    heads : int
+        Number of self-attention heads.  dim % heads must equal 0.
+    mlp_dim : int
+        Hidden dimension of the feed-forward MLP inside each Transformer layer.
+    dropout : float
+        Dropout probability applied to embeddings and attention weights.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        seq_len: int,
+        dim: int = 128,
+        depth: int = 4,
+        heads: int = 4,
+        mlp_dim: int = 256,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        assert dim % heads == 0, f"dim ({dim}) must be divisible by heads ({heads})"
+
+        self.seq_len = seq_len
+
+        # Token and positional embeddings
+        # WHY separate embeddings: token embeds capture meaning, positional
+        # embeds capture order; summing them is the standard GPT approach.
+        self.token_emb = nn.Embedding(vocab_size, dim)
+        self.pos_emb   = nn.Embedding(seq_len, dim)
+        self.emb_drop  = nn.Dropout(dropout)
+
+        # Pre-LN Transformer decoder layers.
+        # WHY norm_first=True: Pre-LN is more stable for training from scratch;
+        # gradients flow directly through the residual stream without passing
+        # through a LayerNorm on the backward pass.
+        # WHY TransformerEncoderLayer with causal mask: PyTorch's
+        # TransformerDecoderLayer is designed for encoder-decoder cross-attention.
+        # For decoder-only GPT we use EncoderLayer + a causal attention mask
+        # (passed in forward), which achieves the same causal masking behaviour
+        # with simpler code.
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=heads,
+            dim_feedforward=mlp_dim,
+            dropout=dropout,
+            batch_first=True,   # (B, seq_len, dim) convention
+            norm_first=True,    # Pre-LN for stability
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=depth,
+            enable_nested_tensor=False,  # suppresses Pre-LN + causal mask warning
+        )
+
+        # Final LayerNorm + linear head
+        self.norm = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, vocab_size, bias=False)
+
+        # Weight tying: share token embedding weights with the LM head.
+        # WHY: reduces parameters, improves generalisation, and is standard
+        # practice in GPT-style models (Press & Wolf, 2017).
+        self.head.weight = self.token_emb.weight
+
+        # Initialise weights: small std for embeddings, scaled for linear layers
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.normal_(self.token_emb.weight, std=0.02)
+        nn.init.normal_(self.pos_emb.weight,   std=0.02)
+        for module in self.modules():
+            if isinstance(module, nn.Linear) and module is not self.head:
+                nn.init.normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        """Upper-triangular boolean mask: True = position is masked (ignored).
+
+        Shape: (seq_len, seq_len).  Entry [i, j] is True when j > i, meaning
+        token i cannot attend to token j (future token).
+        """
+        return torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Parameters
+        ----------
+        x : (B, seq_len) — integer token IDs in range [0, vocab_size)
+
+        Returns
+        -------
+        (B, seq_len, vocab_size) — raw logits (no softmax)
+        """
+        B, T = x.shape
+        assert T <= self.seq_len, (
+            f"Sequence length {T} exceeds model maximum {self.seq_len}"
+        )
+
+        # Build position indices [0, 1, ..., T-1] and embed
+        positions = torch.arange(T, device=x.device).unsqueeze(0)  # (1, T)
+        tok = self.token_emb(x)        # (B, T, dim)
+        pos = self.pos_emb(positions)  # (1, T, dim)
+        h = self.emb_drop(tok + pos)   # (B, T, dim)
+
+        # Causal mask: prevents each token attending to future tokens
+        causal_mask = self._causal_mask(T, x.device)  # (T, T)
+
+        # Transformer forward with causal mask
+        h = self.transformer(h, mask=causal_mask, is_causal=True)  # (B, T, dim)
+
+        # Project to vocabulary
+        h = self.norm(h)        # (B, T, dim)
+        return self.head(h)     # (B, T, vocab_size)
+

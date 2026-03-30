@@ -2681,3 +2681,157 @@ def plot_plasticity(
         print(f"\n  Plasticity score figure saved to {save_path}")
 
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Language model plots
+# ---------------------------------------------------------------------------
+
+def plot_perplexity(results: dict, save_path: str | None = None) -> None:
+    """Plot train and validation perplexity curves for LM runs.
+
+    Parameters
+    ----------
+    results : dict keyed by (dataset, model, series_name) tuples.
+              Each value must contain ``train_perplexity`` and
+              ``test_perplexity`` lists (nan for classification runs,
+              which are silently skipped).
+    save_path : if set, save the figure to this path.
+    """
+    import math as _math
+
+    datasets = sorted({k[0] for k in results})
+    n_ds = max(len(datasets), 1)
+    fig, axes = plt.subplots(1, n_ds, figsize=(6 * n_ds, 4), squeeze=False)
+    fig.suptitle("Language Model Perplexity", fontsize=12, fontweight="bold")
+
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    for col, ds in enumerate(datasets):
+        ax = axes[0][col]
+        ax.set_title(ds, fontsize=10)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Perplexity")
+
+        color_idx = 0
+        for key, hist in results.items():
+            if key[0] != ds:
+                continue
+            train_ppl = hist.get("train_perplexity", [])
+            test_ppl  = hist.get("test_perplexity",  [])
+            # Skip if all nan (classification run or key absent)
+            if not train_ppl or all(_math.isnan(v) for v in train_ppl):
+                continue
+
+            series_name = key[2]
+            color = colors[color_idx % len(colors)]
+            color_idx += 1
+            epochs = list(range(1, len(train_ppl) + 1))
+            ax.plot(epochs, train_ppl, color=color, label=f"{series_name} train",
+                    linewidth=1.8, linestyle="--")
+            if test_ppl:
+                ax.plot(epochs, test_ppl, color=color, label=f"{series_name} val",
+                        linewidth=1.8, linestyle="-")
+
+            # Error bands (multi-seed runs)
+            tr_std = hist.get("train_perplexity_std", [])
+            te_std = hist.get("test_perplexity_std",  [])
+            if tr_std and len(tr_std) == len(train_ppl):
+                ax.fill_between(epochs,
+                    [max(1.0, v - s) for v, s in zip(train_ppl, tr_std)],
+                    [v + s for v, s in zip(train_ppl, tr_std)],
+                    alpha=0.12, color=color)
+            if te_std and len(te_std) == len(test_ppl):
+                ax.fill_between(epochs,
+                    [max(1.0, v - s) for v, s in zip(test_ppl, te_std)],
+                    [v + s for v, s in zip(test_ppl, te_std)],
+                    alpha=0.12, color=color)
+
+        ax.legend(fontsize=7)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Perplexity figure saved to {save_path}")
+
+    plt.show()
+
+
+def plot_token_accuracy(results: dict, save_path: str | None = None) -> None:
+    """Plot token-level accuracy curves for LM runs.
+
+    Parameters
+    ----------
+    results : dict keyed by (dataset, model, series_name) tuples.
+              Each value must contain ``train_acc`` and ``test_acc`` lists.
+              Only LM series (where train_perplexity is finite) are rendered.
+    save_path : if set, save the figure to this path.
+    """
+    import math as _math
+
+    datasets = sorted({k[0] for k in results})
+    n_ds = max(len(datasets), 1)
+    fig, axes = plt.subplots(1, n_ds, figsize=(6 * n_ds, 4), squeeze=False)
+    fig.suptitle("LM Token Accuracy", fontsize=12, fontweight="bold")
+
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    for col, ds in enumerate(datasets):
+        ax = axes[0][col]
+        ax.set_title(ds, fontsize=10)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Token Accuracy")
+        ax.set_ylim(-0.05, 1.05)
+
+        color_idx = 0
+        for key, hist in results.items():
+            if key[0] != ds:
+                continue
+            train_ppl = hist.get("train_perplexity", [])
+            # Skip classification runs (all-nan perplexity)
+            if not train_ppl or all(_math.isnan(v) for v in train_ppl):
+                continue
+
+            train_acc = hist.get("train_acc", [])
+            test_acc  = hist.get("test_acc",  [])
+            if not train_acc:
+                continue
+
+            series_name = key[2]
+            color = colors[color_idx % len(colors)]
+            color_idx += 1
+            epochs = list(range(1, len(train_acc) + 1))
+            ax.plot(epochs, train_acc, color=color, label=f"{series_name} train",
+                    linewidth=1.8, linestyle="--")
+            if test_acc:
+                ax.plot(epochs, test_acc, color=color, label=f"{series_name} val",
+                        linewidth=1.8, linestyle="-")
+
+            # Error bands
+            tr_std = hist.get("train_acc_std", [])
+            te_std = hist.get("test_acc_std",  [])
+            if tr_std and len(tr_std) == len(train_acc):
+                ax.fill_between(epochs,
+                    [max(0, v - s) for v, s in zip(train_acc, tr_std)],
+                    [min(1, v + s) for v, s in zip(train_acc, tr_std)],
+                    alpha=0.12, color=color)
+            if te_std and len(te_std) == len(test_acc):
+                ax.fill_between(epochs,
+                    [max(0, v - s) for v, s in zip(test_acc, te_std)],
+                    [min(1, v + s) for v, s in zip(test_acc, te_std)],
+                    alpha=0.12, color=color)
+
+        ax.legend(fontsize=7)
+        ax.tick_params(labelsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"\n  Token accuracy figure saved to {save_path}")
+
+    plt.show()

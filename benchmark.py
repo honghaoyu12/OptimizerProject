@@ -46,7 +46,7 @@ import torch.nn as nn
 
 from logger import TrainingLogger
 from lr_finder import LRFinder
-from model import MLP, ResNet18, ViT
+from model import MLP, ResNet18, ViT, GPT
 from optimizers import Lion, LAMB, Shampoo, Muon, Adan, AdaHessian, AdaBelief, SignSGD, AdaFactor, Sophia, Prodigy, ScheduleFreeAdamW
 # Custom re-implementations of PyTorch built-in optimizers
 from optimizers import Adam, AdamW, NAdam, RAdam, Adagrad, SGDMomentum, RMSprop
@@ -66,7 +66,8 @@ from visualizer import (plot_benchmark, plot_lr_sensitivity, plot_lr_sensitivity
                         plot_dead_neurons, plot_weight_rank,
                         plot_grad_noise_scale, plot_fisher_trace,
                         plot_grad_alignment, plot_spectral_norm,
-                        plot_optimizer_state_entropy, plot_plasticity)
+                        plot_optimizer_state_entropy, plot_plasticity,
+                        plot_perplexity, plot_token_accuracy)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +103,9 @@ DATASET_REGISTRY: OrderedDict = OrderedDict([
     ("Plateau (synth)",           "plateau"),
     ("Correlated (synth)",        "correlated"),
     ("Imbalanced (synth)",        "imbalanced"),
+    # Language model datasets (GPT only)
+    ("TinyStories (LM)",          "tinystories"),
+    ("WikiText-103 (LM)",         "wikitext103"),
 ])
 
 MODEL_REGISTRY: OrderedDict = OrderedDict([
@@ -127,6 +131,13 @@ MODEL_REGISTRY: OrderedDict = OrderedDict([
             num_classes=info["num_classes"],
         ),
         "description": "Vision Transformer (patch=4, dim=128, depth=6, heads=8)",
+    }),
+    ("GPT", {
+        "factory": lambda info, hs: GPT(
+            vocab_size=info["vocab_size"],
+            seq_len=info["seq_len"],
+        ),
+        "description": "GPT decoder-only Transformer (dim=128, depth=4, heads=4)",
     }),
 ])
 
@@ -418,6 +429,8 @@ def _aggregate_histories(histories: list[dict]) -> dict:
         "grad_alignment",
         "optimizer_state_entropy",
         "plasticity",
+        # LM-specific metrics (nan for classification runs)
+        "train_perplexity", "test_perplexity",
     ]
     for key in list_keys:
         vals = [h.get(key) or [] for h in histories]
@@ -718,6 +731,7 @@ def run_benchmark(
                                 track_optimizer_entropy=track_optimizer_entropy,
                                 plasticity_interval=plasticity_interval,
                                 accum_steps=accum_steps,
+                                task_type=ds_info.get("task_type", "classification"),
                             )
                             seed_histories.append(history)
 
@@ -873,6 +887,10 @@ def parse_args():
                    help="Path to save plasticity score figure ('' to disable)")
     p.add_argument("--save-grad-alignment", default="plots/grad_alignment.png",
                    help="Path to save gradient alignment figure ('' to disable)")
+    p.add_argument("--save-perplexity", default="plots/perplexity.png",
+                   help="Path to save LM perplexity figure ('' to disable)")
+    p.add_argument("--save-token-acc", default="plots/token_accuracy.png",
+                   help="Path to save LM token accuracy figure ('' to disable)")
     p.add_argument("--accum-steps", type=int, default=1,
                    help="Gradient accumulation steps (simulate larger batch; default=1)")
     p.add_argument("--auto-lr", action="store_true",
@@ -1112,6 +1130,14 @@ def main():
     if args.save_plasticity and args.plasticity_interval > 0:
         plot_plasticity(results, dataset_names, model_names, series_names,
                         opt_colors, save_path=args.save_plasticity)
+
+    # ── LM Perplexity ─────────────────────────────────────────────────────
+    if args.save_perplexity:
+        plot_perplexity(results, save_path=args.save_perplexity)
+
+    # ── LM Token Accuracy ─────────────────────────────────────────────────
+    if args.save_token_acc:
+        plot_token_accuracy(results, save_path=args.save_token_acc)
 
     # ── HP Robustness Heatmap ─────────────────────────────────────────────
     if (args.save_hp_heatmap

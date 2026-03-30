@@ -45,6 +45,7 @@ class TestDatasetInfo:
             "mnist", "fashion_mnist", "cifar10", "cifar100", "tiny_imagenet",
             "illcond", "sparse", "noisy_grad", "manifold", "saddle",
             "checkerboard", "plateau", "correlated", "imbalanced",
+            "tinystories", "wikitext103",
         }
 
     @pytest.mark.parametrize("key,in_ch,input_sz,n_cls", [
@@ -158,7 +159,7 @@ class TestTrainingLoop:
         model, opt, crit, device, loader, names = self._setup()
         result = train_one_epoch(model, loader, opt, crit, device, names)
         assert set(result.keys()) == {
-            "loss", "acc", "grad_norms_per_layer",
+            "loss", "acc", "perplexity", "grad_norms_per_layer",
             "grad_norm_global", "grad_norm_std", "grad_norm_before_clip", "step_losses",
             "grad_snr_per_layer", "mean_grad_vec_per_layer", "grad_noise_scale",
         }
@@ -1854,7 +1855,7 @@ class TestGradientAccumulation:
         model, opt, crit, dev, loader, names = self._setup()
         result = train_one_epoch(model, loader, opt, crit, dev, names, accum_steps=2)
         assert set(result.keys()) == {
-            "loss", "acc", "grad_norms_per_layer",
+            "loss", "acc", "perplexity", "grad_norms_per_layer",
             "grad_norm_global", "grad_norm_std", "grad_norm_before_clip", "step_losses",
             "grad_snr_per_layer", "mean_grad_vec_per_layer", "grad_noise_scale",
         }
